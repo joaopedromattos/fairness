@@ -1,0 +1,1 @@
+python ../src/runners/run.py --dataset_name ogbl-collab --K 50 --lr 0.02 --feature_dropout 0.05 --add_normed_features 1 --cache_subgraph_features --label_dropout 0.1 --year 2007 --model BUDDY --reps 3 --epochs 150 --cuda 0
