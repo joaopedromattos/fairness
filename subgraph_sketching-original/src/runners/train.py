@@ -14,6 +14,8 @@ import numpy as np
 
 from src.utils import get_num_samples
 
+from copy import copy
+
 import code
 
 def get_train_func(args):
@@ -80,19 +82,22 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         
         logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
         
-        adv_logits = adv_model(before_logits.detach())
-                
+        adv_logits = adv_model(copy(before_logits.detach()))
+        
         protected_groups_labels = F.one_hot(data.protected[curr_links].sum(1).long())
         
-        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
-        
         adv_loss = F.cross_entropy(adv_logits, protected_groups_labels.float().to(device))
-        print("adv_loss: ", adv_loss)
-
-        loss.backward()
         adv_loss.backward()
-        optimizer.step()
         adv_optimizer.step()
+        
+        # print("adv_loss: ", adv_loss)
+                
+        reg_lambda = 1.0
+        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) - (reg_lambda * adv_loss)
+        # loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
+        loss.backward()
+        optimizer.step()
+        
         adv_total_loss += adv_loss.item() * args.batch_size
         total_loss += loss.item() * args.batch_size
         batch_processing_times.append(time.time() - start_time)

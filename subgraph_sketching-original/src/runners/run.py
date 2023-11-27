@@ -31,6 +31,8 @@ from src.runners.train import get_train_func
 from src.runners.inference import test
 from types import SimpleNamespace
 
+from torchmetrics.functional.classification import multiclass_accuracy
+import torch_geometric
 
 
 def run():
@@ -42,8 +44,12 @@ def run():
     # # args.feature_dropout = wandb.config.feature_dropout
     # # args.max_hash_hops = wandb.config.max_hash_hops
     # args.weight_decay = wandb.config.weight_decay
-
     
+    # Create a timestamp
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    results_dir = f'/home/jrm28/fairness/subgraph_sketching-original/src/results/{args.dataset_name}_{timestamp}/'
+
+    torch_geometric.data.makedirs(results_dir)
 
     device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
     print(f"executing on {device}")
@@ -73,8 +79,9 @@ def run():
             t0 = time.time()
             loss, adv_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
             if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
-                results, test_pred, test_true = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
+                results, test_pred, test_true, test_adv_logits, test_adv_labels = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
                                eval_metric=eval_metric)
+
                 for key, result in results.items():
                     train_res, tmp_val_res, tmp_test_res = result
                     if tmp_val_res > val_res:
@@ -82,11 +89,12 @@ def run():
                         test_res = tmp_test_res
                         best_epoch = epoch
                     res_dic = {f'rep{rep}_loss': loss, f'rep{rep}_Train' + key: 100 * train_res,
-                               f'rep{rep}_adv_loss': loss, f'rep{rep}_Train' + key: 100 * train_res,
+                               f'rep{rep}_adv_loss': adv_loss, f'rep{rep}_Train' + key: 100 * train_res,
                                f'rep{rep}_Val' + key: 100 * val_res, f'rep{rep}_tmp_val' + key: 100 * tmp_val_res,
                                f'rep{rep}_tmp_test' + key: 100 * tmp_test_res,
                                f'rep{rep}_Test' + key: 100 * test_res, f'rep{rep}_best_epoch': best_epoch,
-                               f'rep{rep}_epoch_time': time.time() - t0, 'epoch_step': epoch}
+                               f'rep{rep}_epoch_time': time.time() - t0, 'epoch_step': epoch,
+                               f'rep{rep}_adv_acc': multiclass_accuracy(test_adv_logits.cpu(), test_adv_labels.argmax(1), num_classes=3)}
                     if args.wandb:
                         wandb.log(res_dic)
                         print("log_wandb")
@@ -95,7 +103,8 @@ def run():
                     print(key)
                     print(to_print)
 
-                torch.save({"test_pred" : test_pred, "test_true" : test_true}, f'/home/jrm28/baseline/subgraph_sketching-original/src/results/{args.dataset_name}_{rep}_{epoch}.pth')
+                torch.save({"test_pred" : test_pred, "test_true" : test_true}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}.pth')
+                torch.save({"test_pred_adv" : test_adv_logits, "test_true_adv" : test_adv_labels}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}_adv.pth')
 
         # if args.reps > 1:
         results_list.append([test_res, val_res, train_res])

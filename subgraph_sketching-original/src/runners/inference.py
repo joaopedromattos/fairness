@@ -13,6 +13,9 @@ import numpy as np
 from src.evaluation import evaluate_auc, evaluate_hits, evaluate_mrr
 from src.utils import get_num_samples
 
+import torch.nn.functional as F
+
+
 
 def get_test_func(model_str):
     if model_str == 'ELPH':
@@ -24,17 +27,18 @@ def get_test_func(model_str):
 
 
 @torch.no_grad()
-def test(model, evaluator, train_loader, val_loader, test_loader, args, device, emb=None, eval_metric='hits'):
+def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, args, device, emb=None, eval_metric='hits'):
     print('starting testing')
     t0 = time.time()
     model.eval()
     print("get train predictions")
     test_func = get_test_func(args.model)
-    pos_train_pred, neg_train_pred, train_pred, train_true = test_func(model, train_loader, device, args, split='train')
+    # pos_pred, neg_pred, pred, labels, adv_logits, adv_labels
+    pos_train_pred, neg_train_pred, train_pred, train_true, train_adv_logits, train_adv_labels = test_func(model, adv_model, train_loader, device, args, split='train')
     print("get val predictions")
-    pos_val_pred, neg_val_pred, val_pred, val_true = test_func(model, val_loader, device, args, split='val')
+    pos_val_pred, neg_val_pred, val_pred, val_true, val_adv_logits, val_adv_labels = test_func(model, adv_model, val_loader, device, args, split='val')
     print("get test predictions")
-    pos_test_pred, neg_test_pred, test_pred, test_true = test_func(model, test_loader, device, args, split='test')
+    pos_test_pred, neg_test_pred, test_pred, test_true, test_adv_logits, test_adv_labels = test_func(model, adv_model, test_loader, device, args, split='test')
 
     if eval_metric == 'hits':
         results = evaluate_hits(evaluator, pos_train_pred, neg_train_pred, pos_val_pred, neg_val_pred, pos_test_pred,
@@ -48,7 +52,7 @@ def test(model, evaluator, train_loader, val_loader, test_loader, args, device, 
 
     print(f'testing ran in {time.time() - t0}')
 
-    return results, test_pred, test_true
+    return results, test_pred, test_true, test_adv_logits, test_adv_labels
 
 
 @torch.no_grad()
@@ -96,10 +100,11 @@ def get_preds(model, loader, device, args, emb=None, split=None):
 
 
 @torch.no_grad()
-def get_buddy_preds(model, loader, device, args, split=None):
+def get_buddy_preds(model, adv_model, loader, device, args, split=None):
     n_samples = get_split_samples(split, args, len(loader.dataset))
     t0 = time.time()
     preds = []
+    adv_preds = []
     data = loader.dataset
     # hydrate edges
     links = data.links
@@ -126,8 +131,11 @@ def get_buddy_preds(model, loader, device, args, split=None):
             RA = data.RA[indices].to(device)
         else:
             RA = None
-        logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        adv_logits = adv_model(before_logits.detach()) # Evaluating adversarial model
+        adv_labels = F.one_hot(data.protected[curr_links].sum(1).long())
         preds.append(logits.view(-1).cpu())
+        adv_preds.append(adv_logits.view(-1).cpu())
         if (batch_count + 1) * args.eval_batch_size > n_samples:
             break
 
@@ -137,7 +145,7 @@ def get_buddy_preds(model, loader, device, args, split=None):
     labels = labels[:len(pred)]
     pos_pred = pred[labels == 1]
     neg_pred = pred[labels == 0]
-    return pos_pred, neg_pred, pred, labels
+    return pos_pred, neg_pred, pred, labels, adv_logits, adv_labels
 
 
 def get_split_samples(split, args, dataset_len):
