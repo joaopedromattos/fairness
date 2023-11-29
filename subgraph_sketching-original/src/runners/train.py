@@ -83,17 +83,17 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
         
         adv_logits = adv_model(copy(before_logits.detach()))
+        # code.interact(local={**locals(), **globals()})
+        protected_groups_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())
         
-        protected_groups_labels = F.one_hot(data.protected[curr_links].sum(1).long())
-        
-        adv_loss = F.cross_entropy(adv_logits, protected_groups_labels.float().to(device))
+        adv_loss = F.binary_cross_entropy_with_logits(adv_logits, protected_groups_labels.float().to(device))
         adv_loss.backward()
         adv_optimizer.step()
         
         # print("adv_loss: ", adv_loss)
                 
         reg_lambda = 1.0
-        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) - (reg_lambda * adv_loss)
+        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) + (reg_lambda * adv_loss.item())
         # loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         loss.backward()
         optimizer.step()

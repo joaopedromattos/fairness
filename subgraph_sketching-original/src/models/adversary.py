@@ -18,7 +18,7 @@ class AdversaryLearner(nn.Module):
         # 0 = no sensitive nodes
         # 1 = at least one sensitive node
         # 2 = both sensitive nodes
-        self.lins.append(nn.Linear(self.hidden_channels, 3))
+        self.lins.append(nn.Linear(self.hidden_channels, 2))
         
     def forward(self, batch):
         x = batch

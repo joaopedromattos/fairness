@@ -34,11 +34,11 @@ def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, arg
     print("get train predictions")
     test_func = get_test_func(args.model)
     # pos_pred, neg_pred, pred, labels, adv_logits, adv_labels
-    pos_train_pred, neg_train_pred, train_pred, train_true, train_adv_logits, train_adv_labels = test_func(model, adv_model, train_loader, device, args, split='train')
+    pos_train_pred, neg_train_pred, train_pred, train_true, train_adv_logits, train_adv_labels, train_groups = test_func(model, adv_model, train_loader, device, args, split='train')
     print("get val predictions")
-    pos_val_pred, neg_val_pred, val_pred, val_true, val_adv_logits, val_adv_labels = test_func(model, adv_model, val_loader, device, args, split='val')
+    pos_val_pred, neg_val_pred, val_pred, val_true, val_adv_logits, val_adv_labels, val_groups = test_func(model, adv_model, val_loader, device, args, split='val')
     print("get test predictions")
-    pos_test_pred, neg_test_pred, test_pred, test_true, test_adv_logits, test_adv_labels = test_func(model, adv_model, test_loader, device, args, split='test')
+    pos_test_pred, neg_test_pred, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups = test_func(model, adv_model, test_loader, device, args, split='test')
 
     if eval_metric == 'hits':
         results = evaluate_hits(evaluator, pos_train_pred, neg_train_pred, pos_val_pred, neg_val_pred, pos_test_pred,
@@ -52,7 +52,7 @@ def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, arg
 
     print(f'testing ran in {time.time() - t0}')
 
-    return results, test_pred, test_true, test_adv_logits, test_adv_labels
+    return results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups
 
 
 @torch.no_grad()
@@ -133,7 +133,8 @@ def get_buddy_preds(model, adv_model, loader, device, args, split=None):
             RA = None
         logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
         adv_logits = adv_model(before_logits.detach()) # Evaluating adversarial model
-        adv_labels = F.one_hot(data.protected[curr_links].sum(1).long())
+        groups = data.protected[curr_links].sum(1).long()
+        adv_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())
         preds.append(logits.view(-1).cpu())
         adv_preds.append(adv_logits.view(-1).cpu())
         if (batch_count + 1) * args.eval_batch_size > n_samples:
@@ -145,7 +146,7 @@ def get_buddy_preds(model, adv_model, loader, device, args, split=None):
     labels = labels[:len(pred)]
     pos_pred = pred[labels == 1]
     neg_pred = pred[labels == 0]
-    return pos_pred, neg_pred, pred, labels, adv_logits, adv_labels
+    return pos_pred, neg_pred, pred, labels, adv_logits, adv_labels, groups
 
 
 def get_split_samples(split, args, dataset_len):

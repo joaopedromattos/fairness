@@ -47,7 +47,7 @@ def run():
     
     # Create a timestamp
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    results_dir = f'/home/jrm28/fairness/subgraph_sketching-original/src/results/{args.dataset_name}_{timestamp}/'
+    results_dir = f'/Users/joaopedromattos/Documents/fairness/subgraph_sketching-original/src/results/{args.dataset_name}_{timestamp}/'
 
     torch_geometric.data.makedirs(results_dir)
 
@@ -79,7 +79,7 @@ def run():
             t0 = time.time()
             loss, adv_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
             if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
-                results, test_pred, test_true, test_adv_logits, test_adv_labels = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
+                results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
                                eval_metric=eval_metric)
 
                 for key, result in results.items():
@@ -94,7 +94,7 @@ def run():
                                f'rep{rep}_tmp_test' + key: 100 * tmp_test_res,
                                f'rep{rep}_Test' + key: 100 * test_res, f'rep{rep}_best_epoch': best_epoch,
                                f'rep{rep}_epoch_time': time.time() - t0, 'epoch_step': epoch,
-                               f'rep{rep}_adv_acc': multiclass_accuracy(test_adv_logits.cpu(), test_adv_labels.argmax(1), num_classes=3)}
+                               f'rep{rep}_adv_acc': multiclass_accuracy(test_adv_logits.cpu(), test_adv_labels.argmax(1), num_classes=2)}
                     if args.wandb:
                         wandb.log(res_dic)
                         print("log_wandb")
@@ -104,7 +104,7 @@ def run():
                     print(to_print)
 
                 torch.save({"test_pred" : test_pred, "test_true" : test_true}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}.pth')
-                torch.save({"test_pred_adv" : test_adv_logits, "test_true_adv" : test_adv_labels}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}_adv.pth')
+                torch.save({"test_pred_adv" : test_adv_logits, "test_true_adv" : test_adv_labels, "test_groups" : test_groups}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}_adv.pth')
 
         # if args.reps > 1:
         results_list.append([test_res, val_res, train_res])

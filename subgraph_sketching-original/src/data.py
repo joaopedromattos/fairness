@@ -108,7 +108,7 @@ def get_data(args):
     print(f'reading data from: {path}')
     # if dataset_name.startswith('ogbl'):
     use_lcc_flag = False
-    data = torch.load('/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt')
+    data = torch.load('/Users/joaopedromattos/Documents/fairness/subgraph_sketching-original/dataset/facebook/processed/facebook_1684.pt')
     # if dataset_name == 'ogbl-ddi':
     # dataset.data.x = torch.ones((dataset.data.num_nodes, 1))
     

@@ -2,3 +2,5 @@ __pycache__
 dataset
 results
 wandb
+.DS_Store
+.vscode
