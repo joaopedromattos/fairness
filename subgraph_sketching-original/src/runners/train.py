@@ -93,7 +93,7 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         # print("adv_loss: ", adv_loss)
                 
         reg_lambda = 1.0
-        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) + (reg_lambda * adv_loss.item())
+        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) - (reg_lambda * adv_loss.item())
         # loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         loss.backward()
         optimizer.step()
