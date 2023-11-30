@@ -86,6 +86,13 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         # code.interact(local={**locals(), **globals()})
         protected_groups_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())
         
+<<<<<<< HEAD
+=======
+        protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).int()
+        
+        # code.interact(local=locals())
+        
+>>>>>>> a03aecb (Fixing loss)
         adv_loss = F.binary_cross_entropy_with_logits(adv_logits, protected_groups_labels.float().to(device))
         adv_loss.backward()
         adv_optimizer.step()

@@ -36,7 +36,7 @@ import torch_geometric
 
 
 def run():
-    wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'BUDDY_{args.dataset_name}')
+    wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'BUDDY_{args.dataset_name}', mode="disabled")
 
     # # getting data from W&B Sweeps
     # # args.hidden_channels = wandb.config.hidden_channels
