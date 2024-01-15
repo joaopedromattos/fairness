@@ -85,7 +85,7 @@ def get_gelato_data(splits, dataset_name):
     return splits
 
 
-def get_data(args):
+def get_data(args, dataset_path):
     """
     Read the dataset and generate train, val and test splits.
     For GNN link prediction edges play 2 roles 1/ message passing edges 2/ supervision edges
@@ -108,7 +108,7 @@ def get_data(args):
     print(f'reading data from: {path}')
     # if dataset_name.startswith('ogbl'):
     use_lcc_flag = False
-    data = torch.load('/Users/joaopedromattos/Documents/fairness/subgraph_sketching-original/dataset/facebook/processed/facebook_1684.pt')
+    data = torch.load(dataset_path)
     # if dataset_name == 'ogbl-ddi':
     # dataset.data.x = torch.ones((dataset.data.num_nodes, 1))
     

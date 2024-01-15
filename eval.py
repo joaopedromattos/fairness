@@ -9,6 +9,25 @@ from torchmetrics.functional.classification import binary_auroc
 # from gelato import Gelato
 import code
 
+def normalized_precision_at_k(eval_true, eval_pred, k):
+    """
+    Compute the precision precision@k normalized by group.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :param k: k value.
+    :return: Precision@k
+    """
+    
+    if k > len(eval_pred):
+        k = len(eval_pred)
+    
+    eval_top_index = torch.topk(eval_pred, k, sorted=False).indices.cpu()
+    
+    eval_tp = eval_true[eval_top_index].sum().item()
+    pk = eval_tp / k
+
+    return pk
+
 
 def precision_at_k(eval_true, eval_pred, k):
     """
@@ -77,3 +96,30 @@ def mean_reciprocal_rank(eval_true, eval_pred):
 
 def auc(target, preds):
     return binary_auroc(preds, target).item()
+
+
+def normalized_precision_at_k(eval_true, eval_pred, eval_groups, k):
+    """
+    Compute the precision precision@k normalized by group.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :param k: k value.
+    :return: Precision@k
+    """
+    
+    if k > len(eval_pred):
+        k = len(eval_pred)
+    
+    eval_top_index = torch.topk(eval_pred, k, sorted=False).indices.cpu()
+    
+    eval_intra_group = (eval_groups[eval_top_index] == 0).sum()
+    eval_inter_group = (eval_groups[eval_top_index] == 1).sum()
+    
+    total_intra_group = torch.sum(eval_true == 0)
+    total_inter_group = torch.sum(eval_true == 1)
+    
+    
+    p_eval_intra_group = eval_intra_group / total_intra_group
+    p_eval_inter_group = eval_inter_group / total_inter_group
+
+    return p_eval_intra_group, p_eval_inter_group

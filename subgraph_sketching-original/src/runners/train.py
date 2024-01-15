@@ -31,9 +31,12 @@ def get_train_func(args):
 def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, device, emb=None):
     print('starting training')
     t0 = time.time()
+
     model.train()
     adv_model.train()
+
     total_loss = 0
+    lp_total_loss = 0
     adv_total_loss = 0
     data = train_loader.dataset
     # hydrate edges
@@ -81,31 +84,27 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         adv_optimizer.zero_grad()
         
         logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        lp_loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         
-        adv_logits = adv_model(copy(before_logits.detach()))
-        # code.interact(local={**locals(), **globals()})
-        protected_groups_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())
+        if args.no_intervention:
+            loss = lp_loss
+        else:
+            adv_logits = adv_model(before_logits.detach().clone())
         
-<<<<<<< HEAD
-=======
-        protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).int()
+            protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
+            adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels)
+            
+            adv_loss.backward()
+            adv_optimizer.step()
+            
+            loss = lp_loss - (args.reg_lambda * adv_loss.item())
+            
+            adv_total_loss += adv_loss.item() * args.batch_size
         
-        # code.interact(local=locals())
-        
->>>>>>> a03aecb (Fixing loss)
-        adv_loss = F.binary_cross_entropy_with_logits(adv_logits, protected_groups_labels.float().to(device))
-        adv_loss.backward()
-        adv_optimizer.step()
-        
-        # print("adv_loss: ", adv_loss)
-                
-        reg_lambda = 1.0
-        loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device)) - (reg_lambda * adv_loss.item())
-        # loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         loss.backward()
         optimizer.step()
         
-        adv_total_loss += adv_loss.item() * args.batch_size
+        lp_total_loss += lp_loss.item() * args.batch_size
         total_loss += loss.item() * args.batch_size
         batch_processing_times.append(time.time() - start_time)
 
@@ -118,7 +117,7 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
     if args.log_features:
         model.log_wandb()
 
-    return total_loss / len(train_loader.dataset), adv_total_loss / len(train_loader.dataset)
+    return total_loss / len(train_loader.dataset), adv_total_loss / len(train_loader.dataset), lp_total_loss / len(train_loader.dataset)
 
 
 def train(model, adv_model, optimizer, train_loader, args, device, emb=None):

@@ -10,7 +10,7 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 
-from src.evaluation import evaluate_auc, evaluate_hits, evaluate_mrr
+from src.evaluation import evaluate_auc, evaluate_hits, evaluate_mrr, normalized_precision_at_k, positive_rate_disparity, true_positive_rate_disparity
 from src.utils import get_num_samples
 
 import torch.nn.functional as F
@@ -50,9 +50,31 @@ def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, arg
     elif eval_metric == 'auc':
         results = evaluate_auc(val_pred, val_true, test_pred, test_true)
 
+    fairness_results = {'train': {}, 'val': {}, 'test': {}}        
+    prec_intra, prec_inter = normalized_precision_at_k(train_true, train_pred, train_groups, k=100)
+    fairness_results['train']['precision_intra'] = prec_intra
+    fairness_results['train']['precision_inter'] = prec_inter
+    
+    prec_intra, prec_inter = normalized_precision_at_k(test_true, test_pred, test_groups, k=100)
+    fairness_results['test']['precision_intra'] = prec_intra
+    fairness_results['test']['precision_inter'] = prec_inter
+    
+    positive_rate_disparity_train = positive_rate_disparity(train_pred, train_groups)
+    positive_rate_disparity_test = positive_rate_disparity(test_pred, test_groups)
+    fairness_results['train']['positive_rate_disparity'] = positive_rate_disparity_train
+    fairness_results['test']['positive_rate_disparity'] = positive_rate_disparity_test
+    
+    true_positive_rate_disparity_train = true_positive_rate_disparity(train_true, train_pred, train_groups)
+    true_positive_rate_disparity_test = true_positive_rate_disparity(test_true, test_pred, test_groups)
+    fairness_results['train']['true_positive_rate_disparity'] = true_positive_rate_disparity_train
+    fairness_results['test']['true_positive_rate_disparity'] = true_positive_rate_disparity_test
+    
+    
+    
+
     print(f'testing ran in {time.time() - t0}')
 
-    return results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups
+    return results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results
 
 
 @torch.no_grad()
@@ -105,6 +127,8 @@ def get_buddy_preds(model, adv_model, loader, device, args, split=None):
     t0 = time.time()
     preds = []
     adv_preds = []
+    all_adv_labels = []
+    all_groups = []
     data = loader.dataset
     # hydrate edges
     links = data.links
@@ -134,19 +158,25 @@ def get_buddy_preds(model, adv_model, loader, device, args, split=None):
         logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
         adv_logits = adv_model(before_logits.detach()) # Evaluating adversarial model
         groups = data.protected[curr_links].sum(1).long()
-        adv_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())
+        adv_labels = (data.protected[curr_links].sum(1).long() == 1).float().cpu()
+        all_adv_labels.append(adv_labels)
         preds.append(logits.view(-1).cpu())
         adv_preds.append(adv_logits.view(-1).cpu())
+        all_groups.append(groups)
         if (batch_count + 1) * args.eval_batch_size > n_samples:
             break
 
     if args.wandb:
         wandb.log({f"inference_{split}_epoch_time": time.time() - t0})
+    
     pred = torch.cat(preds)
+    adv_pred = torch.cat(adv_preds)
+    adv_labels = torch.cat(all_adv_labels)
+    groups = torch.cat(all_groups)
     labels = labels[:len(pred)]
     pos_pred = pred[labels == 1]
     neg_pred = pred[labels == 0]
-    return pos_pred, neg_pred, pred, labels, adv_logits, adv_labels, groups
+    return pos_pred, neg_pred, pred, labels, adv_pred, adv_labels, groups
 
 
 def get_split_samples(split, args, dataset_len):

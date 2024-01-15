@@ -2,7 +2,7 @@
 hitrate@k, mean reciprocal rank (MRR) and Area under the receiver operator characteristic curve (AUC) evaluation metrics
 """
 from sklearn.metrics import roc_auc_score
-
+import torch
 
 def evaluate_hits(evaluator, pos_train_pred, neg_train_pred, pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred,
                   Ks=[20, 50, 100], use_val_negs_for_train=True):
@@ -96,3 +96,69 @@ def evaluate_auc(val_pred, val_true, test_pred, test_true):
     results['AUC'] = (valid_auc, test_auc)
 
     return results
+
+
+def normalized_precision_at_k(eval_true, eval_pred, eval_groups, k):
+    """
+    Compute the precision precision@k normalized by group.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :param k: k value.
+    :return: Precision@k
+    """
+    
+    if k > len(eval_pred):
+        k = len(eval_pred)
+    
+    eval_top_index = torch.topk(eval_pred, k, sorted=False).indices.cpu()
+    
+    eval_intra_group = (eval_groups[eval_top_index] == 0).sum()
+    eval_inter_group = (eval_groups[eval_top_index] == 1).sum()
+    
+    total_intra_group = torch.sum(eval_true == 0)
+    total_inter_group = torch.sum(eval_true == 1)
+    
+    
+    p_eval_intra_group = eval_intra_group / total_intra_group
+    p_eval_inter_group = eval_inter_group / total_inter_group
+
+    return p_eval_intra_group, p_eval_inter_group
+
+
+
+def positive_rate_disparity(eval_pred, eval_groups):
+    """
+    Compute the positive disparity.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :return: Positive disparity.
+    """
+    eval_pred = torch.sigmoid(eval_pred)
+    
+    intra_group = (eval_groups == 0) | (eval_groups == 2)
+    inter_group = (eval_groups == 1)
+    
+    probability_of_a_link_given_group = lambda preds, group_size: torch.sum(preds * (1 / group_size))
+    
+    p_eval_intra_group, p_eval_inter_group = probability_of_a_link_given_group(eval_pred[intra_group], intra_group.sum()), probability_of_a_link_given_group(eval_pred[inter_group], inter_group.sum())
+    return p_eval_inter_group - p_eval_intra_group
+
+
+def true_positive_rate_disparity(eval_true, eval_pred, eval_groups):
+    """
+    Compute the positive disparity.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :return: Positive disparity.
+    """
+    # import code
+    # code.interact(local={**locals(), **globals()})
+    eval_pred = torch.sigmoid(eval_pred)
+    
+    intra_group = ((eval_groups == 0) | (eval_groups == 2)) & (eval_true == 1)
+    inter_group = (eval_groups == 1) & (eval_true == 1)
+    
+    probability_of_a_link_given_group = lambda preds, group_size: torch.sum(preds * (1 / group_size))
+
+    p_eval_intra_group, p_eval_inter_group = probability_of_a_link_given_group(eval_pred[intra_group], intra_group.sum()), probability_of_a_link_given_group(eval_pred[inter_group], inter_group.sum())
+    return p_eval_inter_group - p_eval_intra_group

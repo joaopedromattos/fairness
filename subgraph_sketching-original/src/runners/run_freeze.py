@@ -25,53 +25,237 @@ from src.data import get_data, get_loaders
 from src.models.adversary import AdversaryLearner
 from src.models.elph import ELPH, BUDDY
 from src.models.seal import SEALDGCNN, SEALGCN, SEALGIN, SEALSAGE
-from src.utils import ROOT_DIR, print_model_params, select_embedding, str2bool
+from src.utils import ROOT_DIR, get_num_samples, print_model_params, select_embedding, str2bool
 from src.wandb_setup import initialise_wandb
-from src.runners.train import get_train_func
+from src.runners.train import auc_loss, bce_loss, get_train_func
 from src.runners.inference import test
 from types import SimpleNamespace
 
-from torchmetrics.functional.classification import binary_accuracy
+from torchmetrics.functional.classification import multiclass_accuracy
 import torch_geometric
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-torch_geometric.seed_everything(0)
+import torch.nn.functional as F
+
+
+
+def get_loss(loss_str):
+    if loss_str == 'bce':
+        loss = bce_loss
+    elif loss_str == 'auc':
+        loss = auc_loss
+    else:
+        raise NotImplementedError
+    return loss
+
+
+def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, device, emb=None):
+    print('starting training')
+    t0 = time.time()
+
+    model.train()
+    adv_model.eval()
+
+    total_loss = 0
+    lp_total_loss = 0
+    adv_total_loss = 0
+    data = train_loader.dataset
+    # hydrate edges
+    links = data.links
+    labels = torch.tensor(data.labels)
+    # sampling
+    train_samples = get_num_samples(args.train_samples, len(labels))
+    sample_indices = torch.randperm(len(labels))[:train_samples]
+    links = links[sample_indices]
+    labels = labels[sample_indices]
+
+    if args.wandb:
+        wandb.log({"train_total_batches": len(train_loader)})
+
+    batch_processing_times = []
+    loader = DataLoader(range(len(links)), args.batch_size, shuffle=True)
+    for batch_count, indices in enumerate(tqdm(loader)):
+        
+        
+        # do node level things
+        if model.node_embedding is not None:
+            if args.propagate_embeddings:
+                emb = model.propagate_embeddings_func(data.edge_index.to(device))
+            else:
+                emb = model.node_embedding.weight
+        else:
+            emb = None
+        curr_links = links[indices]
+        batch_emb = None if emb is None else emb[curr_links].to(device)
+
+        if args.use_struct_feature:
+            sf_indices = sample_indices[indices]  # need the original link indices as these correspond to sf
+            subgraph_features = data.subgraph_features[sf_indices].to(device)
+        else:
+            subgraph_features = torch.zeros(data.subgraph_features[indices].shape).to(device)
+        node_features = data.x[curr_links].to(device)
+        degrees = data.degrees[curr_links].to(device)
+        if args.use_RA:
+            ra_indices = sample_indices[indices]
+            RA = data.RA[ra_indices].to(device)
+        else:
+            RA = None
+        start_time = time.time()
+        
+        optimizer.zero_grad()
+        # adv_optimizer.zero_grad()
+        
+        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        lp_loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
+        
+        # adv_logits = adv_model(before_logits.detach().clone())
+        # protected_groups_labels = F.one_hot((data.protected[curr_links].sum(1).long() == 1).long())        
+        # adv_loss = F.binary_cross_entropy_with_logits(adv_logits, protected_groups_labels.float().to(device))
+        
+        # adv_loss.backward()
+        # adv_optimizer.step()
+        
+        reg_lambda = 0.1
+        loss = lp_loss
+        
+        loss.backward()
+        optimizer.step()
+        
+        lp_total_loss += lp_loss.item() * args.batch_size
+        # adv_total_loss += adv_loss.item() * args.batch_size
+        total_loss += loss.item() * args.batch_size
+        batch_processing_times.append(time.time() - start_time)
+
+    if args.wandb:
+        wandb.log({"train_batch_time": np.mean(batch_processing_times)})
+        wandb.log({"train_epoch_time": time.time() - t0})
+
+    print(f'training ran in {time.time() - t0}')
+
+    if args.log_features:
+        model.log_wandb()
+
+    return total_loss / len(train_loader.dataset), adv_total_loss / len(train_loader.dataset), lp_total_loss / len(train_loader.dataset)
+
+
+
+def train_adv(model, adv_model, optimizer, adv_optimizer, train_loader, args, device, emb=None):
+    print('starting training')
+    t0 = time.time()
+
+    model.eval()
+    adv_model.train()
+
+    total_loss = 0
+    lp_total_loss = 0
+    adv_total_loss = 0
+    data = train_loader.dataset
+    # hydrate edges
+    links = data.links
+    labels = torch.tensor(data.labels)
+    # sampling
+    train_samples = get_num_samples(args.train_samples, len(labels))
+    sample_indices = torch.randperm(len(labels))[:train_samples]
+    links = links[sample_indices]
+    labels = labels[sample_indices]
+
+    if args.wandb:
+        wandb.log({"train_total_batches": len(train_loader)})
+
+    batch_processing_times = []
+    loader = DataLoader(range(len(links)), args.batch_size, shuffle=True)
+    for batch_count, indices in enumerate(tqdm(loader)):
+        
+        
+        # do node level things
+        if model.node_embedding is not None:
+            if args.propagate_embeddings:
+                emb = model.propagate_embeddings_func(data.edge_index.to(device))
+            else:
+                emb = model.node_embedding.weight
+        else:
+            emb = None
+        curr_links = links[indices]
+        batch_emb = None if emb is None else emb[curr_links].to(device)
+
+        if args.use_struct_feature:
+            sf_indices = sample_indices[indices]  # need the original link indices as these correspond to sf
+            subgraph_features = data.subgraph_features[sf_indices].to(device)
+        else:
+            subgraph_features = torch.zeros(data.subgraph_features[indices].shape).to(device)
+        node_features = data.x[curr_links].to(device)
+        degrees = data.degrees[curr_links].to(device)
+        if args.use_RA:
+            ra_indices = sample_indices[indices]
+            RA = data.RA[ra_indices].to(device)
+        else:
+            RA = None
+        start_time = time.time()
+        
+        # optimizer.zero_grad()
+        adv_optimizer.zero_grad()
+        
+        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        # lp_loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
+        
+        adv_logits = adv_model(before_logits.detach().clone())
+        protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
+        adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels)
+        
+        adv_loss.backward()
+        # import code
+        # code.interact(local={**locals(), **globals()})
+        adv_optimizer.step()
+        
+        # reg_lambda = 0.1
+        # loss = lp_loss
+        
+        # loss.backward()
+        # optimizer.step()
+        
+        # lp_total_loss += lp_loss.item() * args.batch_size
+        adv_total_loss += adv_loss.item() * args.batch_size
+        # total_loss += loss.item() * args.batch_size
+        batch_processing_times.append(time.time() - start_time)
+
+    if args.wandb:
+        wandb.log({"train_batch_time": np.mean(batch_processing_times)})
+        wandb.log({"train_epoch_time": time.time() - t0})
+
+    print(f'training ran in {time.time() - t0}')
+
+    if args.log_features:
+        model.log_wandb()
+    
+
+    return total_loss / len(train_loader.dataset), adv_total_loss / len(train_loader.dataset), lp_total_loss / len(train_loader.dataset)
+
 
 def run():
-    dataset_path = {
-        'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
-        'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
-    }[args.dataset_name]
+    wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'[BASELINE] - BUDDY_{args.dataset_name}', mode="online")
+
+    # # getting data from W&B Sweeps
+    # # args.hidden_channels = wandb.config.hidden_channels
+    # args.lr = wandb.config.lr
+    # # args.feature_dropout = wandb.config.feature_dropout
+    # # args.max_hash_hops = wandb.config.max_hash_hops
+    # args.weight_decay = wandb.config.weight_decay
     
     # Create a timestamp
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    
     results_dir = f'/home/jrm28/fairness/subgraph_sketching-original/src/results/{args.dataset_name}_{timestamp}/'
-    preds_dir = results_dir + f'/preds/'
-    models_dir = results_dir + f'/model/'
 
     torch_geometric.data.makedirs(results_dir)
-    torch_geometric.data.makedirs(preds_dir)
-    torch_geometric.data.makedirs(models_dir)
-    
-    wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'BUDDY_{args.dataset_name}', mode="online")
-    
-    artifact = wandb.Artifact(args.dataset_name, type="dataset")
-    artifact.add_reference(f"file:///{dataset_path}")
-    
-    wandb_run.use_artifact(artifact)
-
-    # getting data from W&B Sweeps
-    if args.wandb_sweep:
-        args.adv_lr = wandb.config.adv_lr
-        args.reg_lambda = wandb.config.reg_lambda
 
     device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
     print(f"executing on {device}")
     results_list = []
-    train_func = get_train_func(args)
+    results_dict_list = []
+    train_func = train_buddy
+    train_adv_func = train_adv
     for rep in range(0, 1):
-        
-        dataset, splits, directed, eval_metric = get_data(args, dataset_path)
+        dataset, splits, directed, eval_metric = get_data(args)
         
         data = dataset
         dataset = SimpleNamespace(data=dataset)
@@ -86,6 +270,9 @@ def run():
         emb = select_embedding(args, data.num_nodes, device)
         model, adv_model, optimizer, adv_optimizer = select_model(args, data, emb, device)
         
+        wandb.watch(model)
+        wandb.watch(adv_model)
+        
         val_res = test_res = best_epoch = 0
         print(f'running repetition {rep}')
         if rep == 0:
@@ -94,10 +281,10 @@ def run():
         for epoch in range(args.epochs):
             t0 = time.time()
 
-            loss, adv_loss, lp_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
+            loss, _, lp_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
+            
             if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
-                results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
-                               eval_metric=eval_metric)
+                results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device, eval_metric=eval_metric)
 
                 for key, result in results.items():
                     # import code
@@ -108,7 +295,7 @@ def run():
                         test_res = tmp_test_res
                         best_epoch = epoch
                     res_dic = {f'rep{rep}_loss': loss, f'rep{rep}_Train' + key: 100 * train_res,
-                               f'rep{rep}_adv_loss': adv_loss, f'rep{rep}_Train' + key: 100 * train_res,
+                            #    f'rep{rep}_adv_loss': adv_loss, f'rep{rep}_Train' + key: 100 * train_res,
                                f'rep{rep}_lp_loss': lp_loss, f'rep{rep}_Train' + key: 100 * train_res,
                                f'rep{rep}_Val' + key: 100 * val_res, f'rep{rep}_tmp_val' + key: 100 * tmp_val_res,
                                f'rep{rep}_tmp_test' + key: 100 * tmp_test_res,
@@ -118,48 +305,83 @@ def run():
                                f'rep{rep}_normalized_prec@100_inter_Train': fairness_results['train']['precision_inter'],
                                f'rep{rep}_normalized_prec@100_intra_Test': fairness_results['test']['precision_intra'],
                                f'rep{rep}_normalized_prec@100_inter_Test': fairness_results['test']['precision_inter'],
-                               f'rep{rep}_positive_rate_disparity_Train': fairness_results['train']['positive_rate_disparity'].abs(),
-                               f'rep{rep}_positive_rate_disparity_Test': fairness_results['test']['positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Train': fairness_results['train']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels)}
+                            #    f'rep{rep}_adv_acc': multiclass_accuracy(test_adv_logits.cpu(), test_adv_labels.argmax(1), num_classes=2)
+                               }
+                    results_dict_list.append(res_dic)
                     if args.wandb:
-                        wandb.log(res_dic)
+                        # wandb.log(res_dic)
                         print("log_wandb")
                     to_print = f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {100 * train_res:.2f}%, Valid: ' \
                                f'{100 * val_res:.2f}%, Test: {100 * test_res:.2f}%, epoch time: {time.time() - t0:.1f}'
                     print(key)
                     print(to_print)
 
-                torch.save({"test_pred" : test_pred, "test_true" : test_true}, f'{preds_dir}/{args.dataset_name}_{rep}_{epoch}.pth')
-                torch.save({"test_pred_adv" : test_adv_logits, "test_true_adv" : test_adv_labels, "test_groups" : test_groups}, f'{preds_dir}/{args.dataset_name}_{rep}_{epoch}_adv.pth')
+                torch.save({"test_pred" : test_pred, "test_true" : test_true}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}.pth')
                 
-                # save optimizer
-                torch.save(optimizer.state_dict(), models_dir + f'{args.dataset_name}_{rep}_{epoch}_optimizer.pth')
+        
+        '''
+        Trains the adversary model on BUDDY with frozen weights.
+        '''        
+        for epoch in range(args.epochs):
+            _, adv_loss, _ = train_adv_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
+            
+            if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
+                results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device, eval_metric=eval_metric)
+                
+                for key, result in results.items():
+                    # import code
+                    # code.interact(local={**globals(), **locals()})
+                    train_res, tmp_val_res, tmp_test_res = result
+                    if tmp_val_res > val_res:
+                        val_res = tmp_val_res
+                        test_res = tmp_test_res
+                        best_epoch = epoch
+                    res_dic = {
+                            'epoch_step': epoch,
+                            # f'rep{rep}_loss': loss, f'rep{rep}_Train' + key: 100 * train_res,
+                               f'rep{rep}_adv_loss': adv_loss,
+                            #    f'rep{rep}_lp_loss': lp_loss, f'rep{rep}_Train' + key: 100 * train_res,
+                            #    f'rep{rep}_Val' + key: 100 * val_res, f'rep{rep}_tmp_val' + key: 100 * tmp_val_res,
+                            #    f'rep{rep}_tmp_test' + key: 100 * tmp_test_res,
+                            #    f'rep{rep}_Test' + key: 100 * test_res, f'rep{rep}_best_epoch': best_epoch,
+                            #    f'rep{rep}_epoch_time': time.time() - t0, 
+                            #    f'rep{rep}_normalized_prec@100_intra_Train': fairness_results['train']['precision_intra'],
+                            #    f'rep{rep}_normalized_prec@100_inter_Train': fairness_results['train']['precision_inter'],
+                            #    f'rep{rep}_normalized_prec@100_intra_Test': fairness_results['test']['precision_intra'],
+                            #    f'rep{rep}_normalized_prec@100_inter_Test': fairness_results['test']['precision_inter'],
+                               f'rep{rep}_adv_acc': multiclass_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels, num_classes=2)
+                               }
 
+                    if args.wandb:
+                        results_dict_list[epoch] |= res_dic
+                        
+                        # code.interact(local=locals())
+                        wandb.log(results_dict_list[epoch])
+                        print("log_wandb")
+                    to_print = f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {100 * train_res:.2f}%, Valid: ' \
+                               f'{100 * val_res:.2f}%, Test: {100 * test_res:.2f}%, epoch time: {time.time() - t0:.1f}'
+                    print(key)
+                    print(to_print)
+                    
+            
+            torch.save({"test_pred_adv" : test_adv_logits, "test_true_adv" : test_adv_labels, "test_groups" : test_groups}, f'{results_dir}/{args.dataset_name}_{rep}_{epoch}_adv.pth')
 
+        # if args.reps > 1:
         results_list.append([test_res, val_res, train_res])
-
+        # if args.reps > 1:
         test_acc_mean, val_acc_mean, train_acc_mean = np.mean(results_list, axis=0) * 100
         test_acc_std = np.sqrt(np.var(results_list, axis=0)[0]) * 100
         wandb_results = {'test_mean': test_acc_mean, 'val_mean': val_acc_mean, 'train_mean': train_acc_mean,
                             'test_acc_std': test_acc_std}
 
         print(wandb_results)
-
-
+        if args.wandb:
+            wandb.log(wandb_results)
+            # if args.wandb:
+            #     wandb.finish()
         if args.save_model:
-            
-            torch.save(model.state_dict(), models_dir + f'{args.dataset_name}_{rep}_{epoch}.pth')
-            
-            model_params_artifact = wandb.Artifact(f"buddy_{timestamp}", type="weights")
-            model_params_artifact.add_reference(f"file://{models_dir + f'/{args.dataset_name}_{rep}_{epoch}.pth'}")
-            wandb_run.use_artifact(model_params_artifact)
-            
-            preds_params_artifact = wandb.Artifact(f"buddy_preds_{timestamp}", type="scores")
-            preds_params_artifact.add_reference(f"file://{preds_dir}")
-            wandb_run.use_artifact(preds_params_artifact)
+            path = f'{ROOT_DIR}/saved_models/{args.dataset_name}'
+            torch.save(model.state_dict(), path)
 
     wandb.finish()
 
@@ -195,9 +417,11 @@ def select_model(args, dataset, emb, device):
     if args.model == 'DGCNN':
         print(f'SortPooling k is set to {model.k}')
         
+    # import code
+    # code.interact(local=dict(globals(), **locals()))
+    # Init adversary model
     adv_model = AdversaryLearner(input_channels=model.lin.in_features, hidden_channels=args.hidden_channels, hidden_layers=8).to(device)
-    adv_optimizer = torch.optim.Adam(params=adv_model.parameters(), lr=args.adv_lr)
-    
+    adv_optimizer = torch.optim.Adam(params=adv_model.parameters(), lr=args.adv_lr, weight_decay=args.weight_decay)
     return model, adv_model, optimizer, adv_optimizer
 
 
@@ -206,7 +430,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Efficient Link Prediction with Hashes (ELPH)')
     parser.add_argument('--dataset_name', type=str, default='Cora',
                         choices=['Cora', 'CiteSeer', 'PubMed', 'ogbl-ppa', 'ogbl-collab', 'ogbl-ddi',
-                                 'ogbl-citation2', 'facebook', 'gplus'])
+                                 'ogbl-citation2', 'facebook'])
     parser.add_argument('--val_pct', type=float, default=0.1,
                         help='the percentage of supervision edges to be used for validation. These edges will not appear'
                              ' in the training set and will only be used as message passing edges in the test set')
@@ -258,10 +482,7 @@ if __name__ == '__main__':
                         help="whether to consider edge weight in GNN")
     # Training settings
     parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--adv_lr', type=float, default=0.00001)
-    parser.add_argument('--reg_lambda', type=float, default=0.001, help="regularization weight $\lambda$ for the adversary")
-    parser.add_argument('--no_intervention', action='store_true', help="turns off or on the intervention loss")
-    
+    parser.add_argument('--adv_lr', type=float, default=0.0001)
     parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay for optimization')
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--num_workers', type=int, default=4)
@@ -328,20 +549,21 @@ if __name__ == '__main__':
 
     # args = initialise_wandb(args)
 
-    if args.wandb_sweep:
-        
-        sweep_configuration = {
-            "name": args.dataset_name,
-            "metric": {"name": "rep0_true_positive_rate_disparity_Test", "goal": "minimize"},
-            "method": "grid",
-            "parameters": {
-                'adv_lr':{'values':[0.00001, 0.00005, 0.0001, 0.0005]},
-                'reg_lambda':{'values':[0.001, 0.0001, 0.00001]},
-            },
-        }
+    
+    # sweep_configuration = {
+    #     "name": args.dataset_name,
+    #     "metric": {"name": "rep0_ValHits@100", "goal": "maximize"},
+    #     "method": "grid",
+    #     "parameters": {
+    #         # 'hidden_channels':{'values':[64, 128, 256, 512]},
+    #         'lr':{'values':[0.0001, 0.001, 0.01]},
+    #         # 'feature_dropout':{'values':[0.0, 0.5, 1.0]},
+    #         # 'max_hash_hops':{'values':[1, 2, 3]},
+    #         'weight_decay':{'values':[0, 0.01, 0.001]},
+    #     },
+    # }
 
-        sweep_id = wandb.sweep(sweep_configuration, project="lpfairness", entity="joaopedromattos")
-        
-        wandb.agent(sweep_id, function=run)
-    else:
-        run()
+    # sweep_id = wandb.sweep(sweep_configuration, project="gelato", entity="joaopedromattos")
+    
+    # wandb.agent(sweep_id, function=run)
+    run()
