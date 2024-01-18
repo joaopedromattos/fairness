@@ -55,22 +55,27 @@ def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, arg
     fairness_results['train']['precision_intra'] = prec_intra
     fairness_results['train']['precision_inter'] = prec_inter
     
+    prec_intra, prec_inter = normalized_precision_at_k(val_true, val_pred, val_groups, k=100)
+    fairness_results['val']['precision_intra'] = prec_intra
+    fairness_results['val']['precision_inter'] = prec_inter
+    
     prec_intra, prec_inter = normalized_precision_at_k(test_true, test_pred, test_groups, k=100)
     fairness_results['test']['precision_intra'] = prec_intra
     fairness_results['test']['precision_inter'] = prec_inter
     
     positive_rate_disparity_train = positive_rate_disparity(train_pred, train_groups)
+    positive_rate_disparity_val = positive_rate_disparity(val_pred, val_groups)
     positive_rate_disparity_test = positive_rate_disparity(test_pred, test_groups)
     fairness_results['train']['positive_rate_disparity'] = positive_rate_disparity_train
+    fairness_results['val']['positive_rate_disparity'] = positive_rate_disparity_val
     fairness_results['test']['positive_rate_disparity'] = positive_rate_disparity_test
     
     true_positive_rate_disparity_train = true_positive_rate_disparity(train_true, train_pred, train_groups)
+    true_positive_rate_disparity_val = true_positive_rate_disparity(val_true, val_pred, val_groups)
     true_positive_rate_disparity_test = true_positive_rate_disparity(test_true, test_pred, test_groups)
     fairness_results['train']['true_positive_rate_disparity'] = true_positive_rate_disparity_train
+    fairness_results['val']['true_positive_rate_disparity'] = true_positive_rate_disparity_val
     fairness_results['test']['true_positive_rate_disparity'] = true_positive_rate_disparity_test
-    
-    
-    
 
     print(f'testing ran in {time.time() - t0}')
 

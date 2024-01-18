@@ -34,9 +34,10 @@ from types import SimpleNamespace
 from torchmetrics.functional.classification import binary_accuracy
 import torch_geometric
 
-torch_geometric.seed_everything(0)
+
 
 def run():
+    
     dataset_path = {
         'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
@@ -52,24 +53,26 @@ def run():
     torch_geometric.data.makedirs(results_dir)
     torch_geometric.data.makedirs(preds_dir)
     torch_geometric.data.makedirs(models_dir)
-    
-    wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'BUDDY_{args.dataset_name}', mode="online")
-    
-    artifact = wandb.Artifact(args.dataset_name, type="dataset")
-    artifact.add_reference(f"file:///{dataset_path}")
-    
-    wandb_run.use_artifact(artifact)
-
-    # getting data from W&B Sweeps
-    if args.wandb_sweep:
-        args.adv_lr = wandb.config.adv_lr
-        args.reg_lambda = wandb.config.reg_lambda
 
     device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
     print(f"executing on {device}")
     results_list = []
     train_func = get_train_func(args)
-    for rep in range(0, 1):
+    for rep in range(args.reps):
+        
+        torch.manual_seed(rep)
+        
+        wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=f'BUDDY_{args.dataset_name}', mode="online")
+    
+        artifact = wandb.Artifact(args.dataset_name, type="dataset")
+        artifact.add_reference(f"file:///{dataset_path}")
+        
+        wandb_run.use_artifact(artifact)
+
+        # getting data from W&B Sweeps
+        if args.wandb_sweep:
+            args.adv_lr = wandb.config.adv_lr
+            args.reg_lambda = wandb.config.reg_lambda
         
         dataset, splits, directed, eval_metric = get_data(args, dataset_path)
         
@@ -107,23 +110,24 @@ def run():
                         val_res = tmp_val_res
                         test_res = tmp_test_res
                         best_epoch = epoch
-                    res_dic = {f'rep{rep}_loss': loss, f'rep{rep}_Train' + key: 100 * train_res,
-                               f'rep{rep}_adv_loss': adv_loss, f'rep{rep}_Train' + key: 100 * train_res,
-                               f'rep{rep}_lp_loss': lp_loss, f'rep{rep}_Train' + key: 100 * train_res,
-                               f'rep{rep}_Val' + key: 100 * val_res, f'rep{rep}_tmp_val' + key: 100 * tmp_val_res,
-                               f'rep{rep}_tmp_test' + key: 100 * tmp_test_res,
-                               f'rep{rep}_Test' + key: 100 * test_res, f'rep{rep}_best_epoch': best_epoch,
-                               f'rep{rep}_epoch_time': time.time() - t0, 'epoch_step': epoch,
-                               f'rep{rep}_normalized_prec@100_intra_Train': fairness_results['train']['precision_intra'],
-                               f'rep{rep}_normalized_prec@100_inter_Train': fairness_results['train']['precision_inter'],
-                               f'rep{rep}_normalized_prec@100_intra_Test': fairness_results['test']['precision_intra'],
-                               f'rep{rep}_normalized_prec@100_inter_Test': fairness_results['test']['precision_inter'],
-                               f'rep{rep}_positive_rate_disparity_Train': fairness_results['train']['positive_rate_disparity'].abs(),
-                               f'rep{rep}_positive_rate_disparity_Test': fairness_results['test']['positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Train': fairness_results['train']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
-                               f'rep{rep}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels)}
+                    res_dic = {f'rep{0}_loss': loss, f'rep{0}_Train' + key: 100 * train_res,
+                               f'rep{0}_adv_loss': adv_loss, f'rep{0}_Train' + key: 100 * train_res,
+                               f'rep{0}_lp_loss': lp_loss, f'rep{0}_Train' + key: 100 * train_res,
+                               f'rep{0}_Val' + key: 100 * val_res, f'rep{0}_tmp_val' + key: 100 * tmp_val_res,
+                               f'rep{0}_tmp_test' + key: 100 * tmp_test_res,
+                               f'rep{0}_Test' + key: 100 * test_res, f'rep{0}_best_epoch': best_epoch,
+                               f'rep{0}_epoch_time': time.time() - t0, 'epoch_step': epoch,
+                               f'rep{0}_normalized_prec@100_intra_Train': fairness_results['train']['precision_intra'],
+                               f'rep{0}_normalized_prec@100_inter_Train': fairness_results['train']['precision_inter'],
+                               f'rep{0}_normalized_prec@100_intra_Test': fairness_results['test']['precision_intra'],
+                               f'rep{0}_normalized_prec@100_inter_Test': fairness_results['test']['precision_inter'],
+                               f'rep{0}_positive_rate_disparity_Train': fairness_results['train']['positive_rate_disparity'].abs(),
+                               f'rep{0}_positive_rate_disparity_Val': fairness_results['val']['positive_rate_disparity'].abs(),
+                               f'rep{0}_positive_rate_disparity_Test': fairness_results['test']['positive_rate_disparity'].abs(),
+                               f'rep{0}_true_positive_rate_disparity_Train': fairness_results['train']['true_positive_rate_disparity'].abs(),
+                               f'rep{0}_true_positive_rate_disparity_Val': fairness_results['val']['true_positive_rate_disparity'].abs(),
+                               f'rep{0}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
+                               f'rep{0}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels)}
                     if args.wandb:
                         wandb.log(res_dic)
                         print("log_wandb")
@@ -161,7 +165,7 @@ def run():
             preds_params_artifact.add_reference(f"file://{preds_dir}")
             wandb_run.use_artifact(preds_params_artifact)
 
-    wandb.finish()
+        wandb.finish()
 
 
 def select_model(args, dataset, emb, device):
@@ -332,7 +336,7 @@ if __name__ == '__main__':
         
         sweep_configuration = {
             "name": args.dataset_name,
-            "metric": {"name": "rep0_true_positive_rate_disparity_Test", "goal": "minimize"},
+            "metric": {"name": f'rep{0}_true_positive_rate_disparity_Val', "goal": "minimize"},
             "method": "grid",
             "parameters": {
                 'adv_lr':{'values':[0.00001, 0.00005, 0.0001, 0.0005]},
