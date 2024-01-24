@@ -41,6 +41,9 @@ def run():
     dataset_path = {
         'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
+        'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
+        'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
+        'sbm_bigger': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_bigger.pt',
     }[args.dataset_name]
     
     # Create a timestamp
@@ -127,6 +130,13 @@ def run():
                                f'rep{0}_true_positive_rate_disparity_Train': fairness_results['train']['true_positive_rate_disparity'].abs(),
                                f'rep{0}_true_positive_rate_disparity_Val': fairness_results['val']['true_positive_rate_disparity'].abs(),
                                f'rep{0}_true_positive_rate_disparity_Test': fairness_results['test']['true_positive_rate_disparity'].abs(),
+                               
+                               f'rep{0}_positive_rate_disparity_Train_no_abs': fairness_results['train']['positive_rate_disparity'],
+                               f'rep{0}_positive_rate_disparity_Val_no_abs': fairness_results['val']['positive_rate_disparity'],
+                               f'rep{0}_positive_rate_disparity_Test_no_abs': fairness_results['test']['positive_rate_disparity'],
+                               f'rep{0}_true_positive_rate_disparity_Train_no_abs': fairness_results['train']['true_positive_rate_disparity'],
+                               f'rep{0}_true_positive_rate_disparity_Val_no_abs': fairness_results['val']['true_positive_rate_disparity'],
+                               f'rep{0}_true_positive_rate_disparity_Test_no_abs': fairness_results['test']['true_positive_rate_disparity'],
                                f'rep{0}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels)}
                     if args.wandb:
                         wandb.log(res_dic)
@@ -210,7 +220,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Efficient Link Prediction with Hashes (ELPH)')
     parser.add_argument('--dataset_name', type=str, default='Cora',
                         choices=['Cora', 'CiteSeer', 'PubMed', 'ogbl-ppa', 'ogbl-collab', 'ogbl-ddi',
-                                 'ogbl-citation2', 'facebook', 'gplus'])
+                                 'ogbl-citation2', 'facebook', 'gplus', 'sbm', 'sbm_medium', 'sbm_bigger'])
     parser.add_argument('--val_pct', type=float, default=0.1,
                         help='the percentage of supervision edges to be used for validation. These edges will not appear'
                              ' in the training set and will only be used as message passing edges in the test set')
