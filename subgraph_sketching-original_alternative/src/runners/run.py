@@ -66,7 +66,7 @@ def run():
         torch.manual_seed(rep)
         
         run_name = '[No Intervention] - ' if args.no_intervention else ''
-        run_name += f'BUDDY_{args.dataset_name}'
+        run_name += f'BUDDY_ALT_{args.dataset_name}'
         wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=run_name, mode="online")
     
         artifact = wandb.Artifact(args.dataset_name, type="dataset")
@@ -102,7 +102,7 @@ def run():
         for epoch in range(args.epochs):
             t0 = time.time()
 
-            loss, adv_loss, lp_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
+            loss, fairness_loss, lp_loss = train_func(model, optimizer, train_loader, args, device)
             if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
                 results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
                                eval_metric=eval_metric)
@@ -116,7 +116,7 @@ def run():
                         test_res = tmp_test_res
                         best_epoch = epoch
                     res_dic = {f'rep{0}_loss': loss, f'rep{0}_Train' + key: 100 * train_res,
-                               f'rep{0}_adv_loss': adv_loss, f'rep{0}_Train' + key: 100 * train_res,
+                               f'rep{0}_fairness_loss': fairness_loss, f'rep{0}_Train' + key: 100 * train_res,
                                f'rep{0}_lp_loss': lp_loss, f'rep{0}_Train' + key: 100 * train_res,
                                f'rep{0}_Val' + key: 100 * val_res, f'rep{0}_tmp_val' + key: 100 * tmp_val_res,
                                f'rep{0}_tmp_test' + key: 100 * tmp_test_res,
@@ -209,11 +209,8 @@ def select_model(args, dataset, emb, device):
     print(f'Total number of parameters is {total_params}')
     if args.model == 'DGCNN':
         print(f'SortPooling k is set to {model.k}')
-        
-    adv_model = AdversaryLearner(input_channels=model.lin.in_features, hidden_channels=args.hidden_channels, hidden_layers=8).to(device)
-    adv_optimizer = torch.optim.Adam(params=adv_model.parameters(), lr=args.adv_lr)
     
-    return model, adv_model, optimizer, adv_optimizer
+    return model, optimizer
 
 
 if __name__ == '__main__':
@@ -334,7 +331,6 @@ if __name__ == '__main__':
     parser.add_argument('--log_features', action='store_true', help="log feature importance")
     parser.add_argument('--cuda', type=int, default=0)
     parser.add_argument('--tpr_loss', action='store_true', help="use tpr loss")
-    parser.add_argument('--tpr_loss_only', action='store_true', help="use ONLY tpr loss")
     
 
     global args

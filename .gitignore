@@ -4,3 +4,5 @@ results
 wandb
 .DS_Store
 .vscode
+saved_output
+rec 

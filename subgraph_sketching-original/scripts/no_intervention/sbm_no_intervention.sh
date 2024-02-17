@@ -1,0 +1,1 @@
+python3 ../src/runners/run.py --dataset sbm --model BUDDY --wandb --reps 1 --epochs 150  --cuda 1 --batch_size 10000 --eval_batch_size 100000 --lr 0.0001 --adv_lr 0.0000 --reg_lambda 0.000 --weight_decay 0.0 --save_model --no_intervention

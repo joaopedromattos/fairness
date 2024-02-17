@@ -7,18 +7,12 @@ from math import inf
 import torch
 from torch.utils.data import DataLoader
 from torch.nn import BCEWithLogitsLoss
-import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 import numpy as np
 
 from src.utils import get_num_samples
 
-from copy import copy
-
-import code
-
-from src.evaluation import true_positive_rate_disparity
 
 def get_train_func(args):
     if args.model == 'ELPH':
@@ -30,16 +24,11 @@ def get_train_func(args):
     return train_func
 
 
-def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, device, emb=None):
+def train_buddy(model, optimizer, train_loader, args, device, emb=None):
     print('starting training')
     t0 = time.time()
-
     model.train()
-    adv_model.train()
-
     total_loss = 0
-    lp_total_loss = 0
-    adv_total_loss = 0
     data = train_loader.dataset
     # hydrate edges
     links = data.links
@@ -55,8 +44,6 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
     batch_processing_times = []
     loader = DataLoader(range(len(links)), args.batch_size, shuffle=True)
     for batch_count, indices in enumerate(tqdm(loader)):
-        
-        
         # do node level things
         if model.node_embedding is not None:
             if args.propagate_embeddings:
@@ -81,56 +68,18 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         else:
             RA = None
         start_time = time.time()
-        
         optimizer.zero_grad()
-        adv_optimizer.zero_grad()
-        
-        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        logits, logits_fairness = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
         lp_loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         
-        if args.no_intervention:
-            loss = lp_loss
+        protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
             
-        elif args.tpr_loss_only:
-            
-            protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
-            
-            loss = lp_loss + 100 * true_positive_rate_disparity(labels[indices].squeeze(0).to(device).detach(), logits.detach(), protected_groups_labels.detach()).abs()
-            
-            
-        elif args.tpr_loss:
-            
-            adv_logits = adv_model(before_logits.detach().clone())
+        fair_loss = get_loss(args.loss)(logits_fairness.view(-1), protected_groups_labels)
         
-            protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
-            
-            adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels) - true_positive_rate_disparity(labels[indices].squeeze(0).to(device).detach(), logits.detach(), protected_groups_labels.detach()).abs()
-            
-            adv_loss.backward()
-            
-            adv_optimizer.step()
-            
-            loss = lp_loss - (args.reg_lambda * adv_loss.item())
-            
-            adv_total_loss += adv_loss.item() * args.batch_size
-            
-        else:
-            adv_logits = adv_model(before_logits.detach().clone())
-        
-            protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
-            adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels)
-            
-            adv_loss.backward()
-            adv_optimizer.step()
-            
-            loss = lp_loss - (args.reg_lambda * adv_loss.item())
-            
-            adv_total_loss += adv_loss.item() * args.batch_size
-        
+        loss = lp_loss + fair_loss
+
         loss.backward()
         optimizer.step()
-        
-        lp_total_loss += lp_loss.item() * args.batch_size
         total_loss += loss.item() * args.batch_size
         batch_processing_times.append(time.time() - start_time)
 
@@ -143,10 +92,10 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
     if args.log_features:
         model.log_wandb()
 
-    return total_loss / len(train_loader.dataset), adv_total_loss / len(train_loader.dataset), lp_total_loss / len(train_loader.dataset)
+    return total_loss / len(train_loader.dataset)
 
 
-def train(model, adv_model, optimizer, train_loader, args, device, emb=None):
+def train(model, optimizer, train_loader, args, device, emb=None):
     """
     Adapted version of the SEAL training function
     :param model:
@@ -214,7 +163,7 @@ def train(model, adv_model, optimizer, train_loader, args, device, emb=None):
     return total_loss / len(train_loader.dataset)
 
 
-def train_elph(model, adv_model, optimizer, train_loader, args, device):
+def train_elph(model, optimizer, train_loader, args, device):
     """
     train a GNN that calculates hashes using message passing
     @param model:
