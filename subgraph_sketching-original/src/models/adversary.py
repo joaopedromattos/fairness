@@ -22,8 +22,8 @@ class AdversaryLearner(nn.Module):
         
     def forward(self, batch):
         x = batch
-        for lin in self.lins[:-1]:
-            x = lin(x)
+        for i in range(len(self.lins) - 1):
+            x = self.lins[i](x)
             x = F.relu(x)
             
         logits = self.lins[-1](x)

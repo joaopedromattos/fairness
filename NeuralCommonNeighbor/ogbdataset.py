@@ -32,14 +32,7 @@ def randomsplit(dataset, val_ratio: float=0.10, test_ratio: float=0.2):
     split_edge['test']['edge_neg'] = removerepeated(data.test_neg_edge_index).t()
     return split_edge
 
-def loaddataset(name: str, use_valedges_as_input: bool, load=None, args=None):
-    dataset_path = {
-        'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
-        'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
-        'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
-        'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
-        'sbm_bigger': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_bigger.pt',
-    }[name]
+def loaddataset(name: str, dataset_path:str, use_valedges_as_input: bool, load=None, args=None):
     
     if name in ["Cora", "Citeseer", "Pubmed"]:
         dataset = Planetoid(root="dataset", name=name)
@@ -48,17 +41,12 @@ def loaddataset(name: str, use_valedges_as_input: bool, load=None, args=None):
         data.edge_index = to_undirected(split_edge["train"]["edge"].t())
         edge_index = data.edge_index
         data.num_nodes = data.x.shape[0]
-    if name in dataset_path:
-        data = torch.load(dataset_path)
-        split_edge = randomsplit(data)
-        data.edge_index = to_undirected(split_edge["train"]["edge"].t())
-        edge_index = data.edge_index
-        data.num_nodes = data.x.shape[0]
-    else:
-        dataset = PygLinkPropPredDataset(name=f'ogbl-{name}')
-        split_edge = dataset.get_edge_split()
-        data = dataset[0]
-        edge_index = data.edge_index
+
+    data = torch.load(dataset_path)
+    split_edge = randomsplit(data)
+    data.edge_index = to_undirected(split_edge["train"]["edge"].t())
+    edge_index = data.edge_index
+    data.num_nodes = data.x.shape[0]
         
     data.edge_weight = None 
     print(data.num_nodes, edge_index.max())
@@ -76,6 +64,22 @@ def loaddataset(name: str, use_valedges_as_input: bool, load=None, args=None):
         data.max_x = -1
         
     split_edge['train']['edge_neg'] = negative_sampling(data.train_pos_edge_index, data.adj_t.sizes()[0]).t()
+    
+    if args.node_split:
+        mask = torch.zeros(data.num_nodes).bool()
+        mask_test = torch.zeros(data.num_nodes).bool()
+        idx = torch.randperm(data.num_nodes)
+        train_val_idx = idx[:int(idx.shape[0] * 0.8)]
+        test_idx = idx[int(idx.shape[0] * 0.8):]
+        mask[train_val_idx] = True
+        mask_test[test_idx] = True
+        
+        split_edge['train']['edge'] = split_edge['train']['edge'][mask[split_edge['train']['edge']].all(1)]
+        split_edge['train']['edge_neg'] = split_edge['train']['edge_neg'][mask[split_edge['train']['edge_neg']].all(1)]
+        split_edge['valid']['edge'] = split_edge['valid']['edge'][mask[split_edge['valid']['edge']].all(1)]
+        split_edge['valid']['edge_neg'] = split_edge['valid']['edge_neg'][mask[split_edge['valid']['edge_neg']].all(1)]
+        split_edge['test']['edge'] = split_edge['test']['edge'][mask_test[split_edge['test']['edge']].all(1)]
+        split_edge['test']['edge_neg'] = split_edge['test']['edge_neg'][mask_test[split_edge['test']['edge_neg']].all(1)]
 
     print("dataset split ")
     for key1 in split_edge:

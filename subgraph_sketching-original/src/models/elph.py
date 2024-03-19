@@ -292,7 +292,7 @@ class BUDDY(torch.nn.Module):
         normed_x[torch.isinf(normed_x)] = 0
         return torch.cat([x, normed_x], dim=1)
 
-    def feature_forward(self, x):
+    def feature_forward(self, x, curr_links):
         """
         small neural network applied edgewise to hadamard product of node features
         @param x: node features torch tensor [batch_size, 2, hidden_dim]
@@ -302,13 +302,16 @@ class BUDDY(torch.nn.Module):
             x = self.sign(x)
         else:
             x = self.lin_feat(x)
-        x = x[:, 0, :] * x[:, 1, :]
+        before_product = x
+            # import code
+            # code.interact(local={**locals(), **globals()})
+        link_emb = x[curr_links[:, 0]] * x[curr_links[:, 1]]
         # mlp at the end
-        x = self.lin_out(x)
-        x = self.bn_feats(x)
-        x = F.relu(x)
-        x = F.dropout(x, p=self.feature_dropout, training=self.training)
-        return x
+        link_emb = self.lin_out(link_emb)
+        link_emb = self.bn_feats(link_emb)
+        link_emb = F.relu(link_emb)
+        link_emb = F.dropout(link_emb, p=self.feature_dropout, training=self.training)
+        return link_emb, before_product
 
     def embedding_forward(self, x):
         x = self.lin_emb(x)
@@ -321,7 +324,7 @@ class BUDDY(torch.nn.Module):
 
         return x
 
-    def forward(self, sf, node_features, src_degree=None, dst_degree=None, RA=None, emb=None):
+    def forward(self, sf, node_features, src_degree=None, dst_degree=None, RA=None, emb=None, curr_links=None):
         """
         forward pass for one batch of edges
         @param sf: subgraph features [batch_size, num_hops*(num_hops+2)]
@@ -339,7 +342,7 @@ class BUDDY(torch.nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=self.label_dropout, training=self.training)
         if self.use_feature:
-            node_features = self.feature_forward(node_features)
+            node_features, before_product = self.feature_forward(node_features, curr_links)
             x = torch.cat([x, node_features.to(torch.float)], 1)
         if self.node_embedding is not None:
             node_embedding = self.embedding_forward(emb)
@@ -351,7 +354,7 @@ class BUDDY(torch.nn.Module):
             
         before_logits = x.clone()
         x = self.lin(x)
-        return x, before_logits
+        return x, before_logits, before_product
 
     def print_params(self):
         print(f'model bias: {self.lin.bias.item():.3f}')

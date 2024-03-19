@@ -34,6 +34,9 @@ from types import SimpleNamespace
 from torchmetrics.functional.classification import binary_accuracy
 import torch_geometric
 
+import os
+
+torch.autograd.set_detect_anomaly(True)
 
 
 def run():
@@ -41,6 +44,7 @@ def run():
     dataset_path = {
         'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
+        'facebook_graphair': f"/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/facebook_graphair.pt",
         'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
         'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
         'sbm_bigger': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_bigger.pt',
@@ -58,6 +62,7 @@ def run():
     torch_geometric.data.makedirs(models_dir)
 
     device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
+    # device = 'cpu'
     print(f"executing on {device}")
     results_list = []
     train_func = get_train_func(args)
@@ -66,8 +71,12 @@ def run():
         torch.manual_seed(rep)
         
         run_name = '[No Intervention] - ' if args.no_intervention else ''
+        run_name += 'FT - ' if args.full_training else ''
+        run_name += 'NCNC_splits - ' if args.ncnc_splits else ''
+        run_name += 'NODE_LEVEL - ' if args.node_level else ''
         run_name += f'BUDDY_{args.dataset_name}'
-        wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=run_name, mode="online")
+        tags = ['tunning'] if args.wandb_sweep else []
+        wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=run_name, mode="disabled" if args.no_wandb else "online", tags=tags)
     
         artifact = wandb.Artifact(args.dataset_name, type="dataset")
         artifact.add_reference(f"file:///{dataset_path}")
@@ -78,12 +87,24 @@ def run():
         if args.wandb_sweep:
             args.adv_lr = wandb.config.adv_lr
             args.reg_lambda = wandb.config.reg_lambda
+            
+        dataset_file = f"../dataset/splits/{args.dataset_name}.pt" 
+        if os.path.isfile(dataset_file):
+            dataset, splits, directed, eval_metric = torch.load(dataset_file)
+        else:
+            dataset, splits, directed, eval_metric = get_data(args, dataset_path)
+            torch.save((dataset, splits, directed, eval_metric), dataset_file)
         
-        dataset, splits, directed, eval_metric = get_data(args, dataset_path)
-        
+        if args.full_training:
+            print("Reading full training")
+            dataset, splits, directed, eval_metric = get_data(args, dataset_path)
+            
+        if args.ncnc_splits:
+            print("Reading ncnc splits")
+            dataset, splits, directed, eval_metric = get_data(args, dataset_path)
+
         data = dataset
         dataset = SimpleNamespace(data=dataset)
-        
         
         train_loader, train_eval_loader, val_loader, test_loader = get_loaders(args, dataset, splits, directed)
         # if args.dataset_name.startswith('ogbl'):  # then this is one of the ogb link prediction datasets
@@ -104,12 +125,11 @@ def run():
 
             loss, adv_loss, lp_loss = train_func(model, adv_model, optimizer, adv_optimizer, train_loader, args, device)
             if ((epoch + 1) % args.eval_steps == 0) or (epoch == args.epochs - 1):
-                results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
+                results, test_pred, test_true, train_adv_logits, train_adv_labels, test_adv_logits, test_adv_labels, test_groups, fairness_results = test(model, adv_model, evaluator, train_eval_loader, val_loader, test_loader, args, device,
                                eval_metric=eval_metric)
 
                 for key, result in results.items():
-                    # import code
-                    # code.interact(local={**globals(), **locals()})
+                    
                     train_res, tmp_val_res, tmp_test_res = result
                     if tmp_val_res > val_res:
                         val_res = tmp_val_res
@@ -138,7 +158,8 @@ def run():
                                f'rep{0}_true_positive_rate_disparity_Train_no_abs': fairness_results['train']['true_positive_rate_disparity'],
                                f'rep{0}_true_positive_rate_disparity_Val_no_abs': fairness_results['val']['true_positive_rate_disparity'],
                                f'rep{0}_true_positive_rate_disparity_Test_no_abs': fairness_results['test']['true_positive_rate_disparity'],
-                               f'rep{0}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels)}
+                               f'rep{0}_adv_acc_train': binary_accuracy(torch.sigmoid(train_adv_logits).cpu(), train_adv_labels.cpu()),
+                               f'rep{0}_adv_acc': binary_accuracy(torch.sigmoid(test_adv_logits).cpu(), test_adv_labels.cpu())}
                     if args.wandb:
                         wandb.log(res_dic)
                         print("log_wandb")
@@ -210,7 +231,7 @@ def select_model(args, dataset, emb, device):
     if args.model == 'DGCNN':
         print(f'SortPooling k is set to {model.k}')
         
-    adv_model = AdversaryLearner(input_channels=model.lin.in_features, hidden_channels=args.hidden_channels, hidden_layers=8).to(device)
+    adv_model = AdversaryLearner(input_channels= args.hidden_channels if args.node_level else model.lin.in_features, hidden_channels=args.hidden_channels, hidden_layers=8).to(device)
     adv_optimizer = torch.optim.Adam(params=adv_model.parameters(), lr=args.adv_lr)
     
     return model, adv_model, optimizer, adv_optimizer
@@ -221,7 +242,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Efficient Link Prediction with Hashes (ELPH)')
     parser.add_argument('--dataset_name', type=str, default='Cora',
                         choices=['Cora', 'CiteSeer', 'PubMed', 'ogbl-ppa', 'ogbl-collab', 'ogbl-ddi',
-                                 'ogbl-citation2', 'facebook', 'gplus', 'sbm', 'sbm_medium', 'sbm_bigger'])
+                                 'ogbl-citation2', 'facebook', 'facebook_graphair', 'gplus', 'sbm', 'sbm_medium', 'sbm_bigger'])
     parser.add_argument('--val_pct', type=float, default=0.1,
                         help='the percentage of supervision edges to be used for validation. These edges will not appear'
                              ' in the training set and will only be used as message passing edges in the test set')
@@ -335,6 +356,10 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', type=int, default=0)
     parser.add_argument('--tpr_loss', action='store_true', help="use tpr loss")
     parser.add_argument('--tpr_loss_only', action='store_true', help="use ONLY tpr loss")
+    parser.add_argument('--full_training', action='store_true', help="Full training")
+    parser.add_argument('--ncnc_splits', action='store_true', help="NCNC Splits training")
+    parser.add_argument('--node_level', action='store_true', help="Consider fairness as a node-level task")
+    parser.add_argument('--no_wandb', action='store_true', help="disables wandb")
     
 
     global args
@@ -351,10 +376,10 @@ if __name__ == '__main__':
         sweep_configuration = {
             "name": args.dataset_name,
             "metric": {"name": f'rep{0}_true_positive_rate_disparity_Val', "goal": "minimize"},
-            "method": "grid",
+            "method": "bayes",
             "parameters": {
-                'adv_lr':{'values':[0.00001, 0.00005, 0.0001, 0.0005]},
-                'reg_lambda':{'values':[0.001, 0.0001, 0.00001]},
+                'adv_lr':{'max':0.01, 'min':0.0001},
+                'reg_lambda':{'max':0.1, 'min':0.0001},
             },
         }
 

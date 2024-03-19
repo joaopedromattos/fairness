@@ -6,3 +6,8 @@ wandb
 .vscode
 saved_output
 rec 
+graphair/fairgraph/method/checkpoint
+_old/
+data
+*.pt
+*.pth

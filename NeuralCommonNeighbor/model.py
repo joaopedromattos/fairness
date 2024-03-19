@@ -575,6 +575,7 @@ class CNLinkPredictor(nn.Module):
                            tar_ei,
                            filled1: bool = False,
                            cndropprobs: Iterable[float] = []):
+        
         adj = self.dropadj(adj)
         xi = x[tar_ei[0]]
         xj = x[tar_ei[1]]
@@ -587,6 +588,154 @@ class CNLinkPredictor(nn.Module):
             [self.lin(self.xcnlin(xcn) * self.beta + xij) for xcn in xcns],
             dim=-1)
         return xs
+
+    def forward(self, x, adj, tar_ei, filled1: bool = False):
+        return self.multidomainforward(x, adj, tar_ei, filled1, [])
+    
+    
+# NCN predictor
+class CNLinkPredictor(nn.Module):
+    cndeg: Final[int]
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 num_layers,
+                 dropout,
+                 edrop=0.0,
+                 ln=False,
+                 cndeg=-1,
+                 use_xlin=False,
+                 tailact=False,
+                 twolayerlin=False,
+                 beta=1.0):
+        super().__init__()
+
+        self.register_parameter("beta", nn.Parameter(beta*torch.ones((1))))
+        self.dropadj = DropAdj(edrop)
+        lnfn = lambda dim, ln: nn.LayerNorm(dim) if ln else nn.Identity()
+
+        self.xlin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True)) if use_xlin else lambda x: 0
+
+        self.xcnlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True),
+            nn.ReLU(inplace=True), nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.xijlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels), lnfn(hidden_channels, ln),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.lin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+                                 lnfn(hidden_channels, ln),
+                                 nn.Dropout(dropout, inplace=True),
+                                 nn.ReLU(inplace=True),
+                                 nn.Linear(hidden_channels, hidden_channels) if twolayerlin else nn.Identity(),
+                                 lnfn(hidden_channels, ln) if twolayerlin else nn.Identity(),
+                                 nn.Dropout(dropout, inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.ReLU(inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.Linear(hidden_channels, out_channels))
+        self.cndeg = cndeg
+
+    def multidomainforward(self,
+                           x,
+                           adj,
+                           tar_ei,
+                           filled1: bool = False,
+                           cndropprobs: Iterable[float] = []):
+        
+        adj = self.dropadj(adj)
+        xi = x[tar_ei[0]]
+        xj = x[tar_ei[1]]
+        x = x + self.xlin(x)
+        cn = adjoverlap(adj, adj, tar_ei, filled1, cnsampledeg=self.cndeg)
+        xcns = [spmm_add(cn, x)]
+        xij = self.xijlin(xi * xj)
+        
+        xs = torch.cat(
+            [self.lin(self.xcnlin(xcn) * self.beta + xij) for xcn in xcns],
+            dim=-1)
+        
+        return xs
+
+    def forward(self, x, adj, tar_ei, filled1: bool = False):
+        return self.multidomainforward(x, adj, tar_ei, filled1, [])
+
+class CNLinkPredictorModded(nn.Module):
+    cndeg: Final[int]
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 num_layers,
+                 dropout,
+                 edrop=0.0,
+                 ln=False,
+                 cndeg=-1,
+                 use_xlin=False,
+                 tailact=False,
+                 twolayerlin=False,
+                 beta=1.0):
+        super().__init__()
+
+        self.register_parameter("beta", nn.Parameter(beta*torch.ones((1))))
+        self.dropadj = DropAdj(edrop)
+        lnfn = lambda dim, ln: nn.LayerNorm(dim) if ln else nn.Identity()
+
+        self.xlin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True)) if use_xlin else lambda x: 0
+
+        self.xcnlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True),
+            nn.ReLU(inplace=True), nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.xijlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels), lnfn(hidden_channels, ln),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.lin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+                                 lnfn(hidden_channels, ln),
+                                 nn.Dropout(dropout, inplace=True),
+                                 nn.ReLU(inplace=True),
+                                 nn.Linear(hidden_channels, hidden_channels) if twolayerlin else nn.Identity(),
+                                 lnfn(hidden_channels, ln) if twolayerlin else nn.Identity(),
+                                 nn.Dropout(dropout, inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.ReLU(inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.Linear(hidden_channels, out_channels))
+        self.cndeg = cndeg
+
+    def multidomainforward(self,
+                           x,
+                           adj,
+                           tar_ei,
+                           filled1: bool = False,
+                           cndropprobs: Iterable[float] = []):
+        
+        adj = self.dropadj(adj)
+        xi = x[tar_ei[0]]
+        xj = x[tar_ei[1]]
+        x = x + self.xlin(x)
+        cn = adjoverlap(adj, adj, tar_ei, filled1, cnsampledeg=self.cndeg)
+        xcns = [spmm_add(cn, x)]
+        xij = self.xijlin(xi * xj)
+        
+        xs = torch.cat(
+            [self.lin(self.xcnlin(xcn) * self.beta + xij) for xcn in xcns],
+            dim=-1)
+        
+        embs = torch.cat(
+            [self.xcnlin(xcn) * self.beta + xij for xcn in xcns],
+            dim=-1)
+        
+        return xs, embs
 
     def forward(self, x, adj, tar_ei, filled1: bool = False):
         return self.multidomainforward(x, adj, tar_ei, filled1, [])
@@ -648,12 +797,82 @@ class CN0LinkPredictor(nn.Module):
         adj = self.dropadj(adj)
         xi = x[tar_ei[0]]
         xj = x[tar_ei[1]]
+        
         xij = self.xijlin(xi * xj)
         
         xs = torch.cat(
             [self.lin(xij)],
             dim=-1)
+        
         return xs
+
+    def forward(self, x, adj, tar_ei, filled1: bool = False):
+        return self.multidomainforward(x, adj, tar_ei, filled1, [])
+
+class CN0LinkPredictorModded(nn.Module):
+    cndeg: Final[int]
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 num_layers,
+                 dropout,
+                 edrop=0.0,
+                 ln=False,
+                 cndeg=-1,
+                 use_xlin=False,
+                 tailact=False,
+                 twolayerlin=False,
+                 beta=1.0):
+        super().__init__()
+
+        self.register_parameter("beta", nn.Parameter(beta*torch.ones((1))))
+        self.dropadj = DropAdj(edrop)
+        lnfn = lambda dim, ln: nn.LayerNorm(dim) if ln else nn.Identity()
+
+        self.xlin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True)) if use_xlin else lambda x: 0
+
+        self.xcnlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels),
+            lnfn(hidden_channels, ln), nn.Dropout(dropout, inplace=True),
+            nn.ReLU(inplace=True), nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.xijlin = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels), lnfn(hidden_channels, ln),
+            nn.Dropout(dropout, inplace=True), nn.ReLU(inplace=True),
+            nn.Linear(hidden_channels, hidden_channels) if not tailact else nn.Identity())
+        self.lin = nn.Sequential(nn.Linear(hidden_channels, hidden_channels),
+                                 lnfn(hidden_channels, ln),
+                                 nn.Dropout(dropout, inplace=True),
+                                 nn.ReLU(inplace=True),
+                                 nn.Linear(hidden_channels, hidden_channels) if twolayerlin else nn.Identity(),
+                                 lnfn(hidden_channels, ln) if twolayerlin else nn.Identity(),
+                                 nn.Dropout(dropout, inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.ReLU(inplace=True) if twolayerlin else nn.Identity(),
+                                 nn.Linear(hidden_channels, out_channels))
+        self.cndeg = cndeg
+
+    def multidomainforward(self,
+                           x,
+                           adj,
+                           tar_ei,
+                           filled1: bool = False,
+                           cndropprobs: Iterable[float] = []):
+        adj = self.dropadj(adj)
+        xi = x[tar_ei[0]]
+        xj = x[tar_ei[1]]
+        
+        xij = self.xijlin(xi * xj)
+        
+        xs = torch.cat(
+            [self.lin(xij)],
+            dim=-1)
+        
+        return xs, xij
 
     def forward(self, x, adj, tar_ei, filled1: bool = False):
         return self.multidomainforward(x, adj, tar_ei, filled1, [])
@@ -853,7 +1072,6 @@ class CNhalf2LinkPredictor(CNLinkPredictor):
         return self.multidomainforward(x, adj, tar_ei, filled1, [])
 
 
-
 # NCN-diff
 class CNResLinkPredictor(CNLinkPredictor):
 
@@ -970,10 +1188,12 @@ class CN2LinkPredictor(nn.Module):
 
 predictor_dict = {
     "cn0": CN0LinkPredictor,
+    "cn0_mod": CN0LinkPredictorModded,
     "catscn1": CatSCNLinkPredictor,
     "scn1": SCNLinkPredictor,
     "sincn1cn1": IncompleteSCN1Predictor,
     "cn1": CNLinkPredictor,
+    "cn1_mod": CNLinkPredictorModded,
     "cn1.5": CNhalf2LinkPredictor,
     "cn1res": CNResLinkPredictor,
     "cn2": CN2LinkPredictor,

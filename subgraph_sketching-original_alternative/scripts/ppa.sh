@@ -1,1 +1,0 @@
-python ../src/runners/run.py --dataset_name ogbl-ppa --label_dropout 0.1 --use_feature 0 --use_RA 1 --lr 0.03 --epochs 150 --reps 3 --hidden_channels 256 --cache_subgraph_features --add_normed_features 1 --model BUDDY --cuda 0

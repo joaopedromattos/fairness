@@ -79,7 +79,7 @@ def test(model, adv_model, evaluator, train_loader, val_loader, test_loader, arg
 
     print(f'testing ran in {time.time() - t0}')
 
-    return results, test_pred, test_true, test_adv_logits, test_adv_labels, test_groups, fairness_results
+    return results, test_pred, test_true, train_adv_logits, train_adv_labels, test_adv_logits, test_adv_labels, test_groups, fairness_results
 
 
 @torch.no_grad()
@@ -154,20 +154,27 @@ def get_buddy_preds(model, adv_model, loader, device, args, split=None):
             subgraph_features = data.subgraph_features[indices].to(device)
         else:
             subgraph_features = torch.zeros(data.subgraph_features[indices].shape).to(device)
-        node_features = data.x[curr_links].to(device)
+        node_features = data.x.to(device)
         degrees = data.degrees[curr_links].to(device)
         if args.use_RA:
             RA = data.RA[indices].to(device)
         else:
             RA = None
-        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
-        adv_logits = adv_model(before_logits.detach()) # Evaluating adversarial model
+        logits, before_logits, node_embs = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb, curr_links)
+        
+        if args.node_level:
+            adv_labels = data.protected.float().to(device)
+            adv_logits = adv_model(node_embs)
+        else:
+            adv_logits = adv_model(before_logits.detach()) # Evaluating adversarial model
+            adv_labels = (data.protected[curr_links].sum(1).long() == 1).float().cpu()
+            
         groups = data.protected[curr_links].sum(1).long()
-        adv_labels = (data.protected[curr_links].sum(1).long() == 1).float().cpu()
+        all_groups.append(groups)
         all_adv_labels.append(adv_labels)
         preds.append(logits.view(-1).cpu())
         adv_preds.append(adv_logits.view(-1).cpu())
-        all_groups.append(groups)
+        
         if (batch_count + 1) * args.eval_batch_size > n_samples:
             break
 

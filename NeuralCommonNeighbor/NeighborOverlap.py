@@ -24,6 +24,9 @@ import datetime
 
 import os
 
+from torchmetrics.functional.classification import binary_accuracy
+
+torch.autograd.set_detect_anomaly(True)
 
 
 def set_seed(seed):
@@ -53,6 +56,7 @@ def train(model,
           batch_size,
           reg_lambda,
           no_intervention,
+          link_level,
           maskinput: bool = True,
           cnprobs: Iterable[float]=[],
           alpha: float=None):
@@ -89,36 +93,72 @@ def train(model,
             adj = adj.to_symmetric()
         else:
             adj = data.adj_t
+        
+        model = model.to(data.x.device)
         h = model(data.x, adj)
         edge = pos_train_edge[:, perm]
-        pos_outs = predictor.multidomainforward(h,
+        
+        if not link_level:
+            pos_outs = predictor.multidomainforward(h,
                                                     adj,
                                                     edge,
                                                     cndropprobs=cnprobs)
 
-        pos_losss = -F.logsigmoid(pos_outs).mean()
-        edge = negedge[:, perm]
-        neg_outs = predictor.multidomainforward(h, adj, edge, cndropprobs=cnprobs)
-        neg_losss = -F.logsigmoid(-neg_outs).mean()
-        
+            pos_losss = -F.logsigmoid(pos_outs).mean()
+            edge = negedge[:, perm]
+            neg_outs = predictor.multidomainforward(h, adj, edge, cndropprobs=cnprobs)
+            neg_losss = -F.logsigmoid(-neg_outs).mean()
+        else:
+            pos_outs, pos_embs = predictor.multidomainforward(h,
+                                                    adj,
+                                                    edge,
+                                                    cndropprobs=cnprobs)
+
+            pos_losss = -F.logsigmoid(pos_outs).mean()
+            edge = negedge[:, perm]
+            neg_outs, neg_embs = predictor.multidomainforward(h, adj, edge, cndropprobs=cnprobs)
+            neg_losss = -F.logsigmoid(-neg_outs).mean()
+            
         if not no_intervention:
-            fair_pred = fair_model(h)
-            # import code
-            # code.interact(local={**locals(), **globals()})
-            
-            fairness_loss = F.binary_cross_entropy_with_logits(fair_pred.squeeze(-1), data.y.float())
-            
-            fairness_loss.backward(retain_graph=True)
-            print("Gradient sum: fair_model.lins[1].weight.grad.sum()", fair_model.lins[1].weight.grad.sum(), flush=True)
-            fair_optimizer.step()
-                        
-            loss = neg_losss + pos_losss - (reg_lambda * fairness_loss)
-            total_fair_loss.append(fairness_loss.item())
+            if link_level:
+                protected_groups_labels_pos = (data.y[pos_train_edge[:, perm]].sum(0).long() == 1).float()
+                protected_groups_labels_neg = (data.y[negedge[:, perm]].sum(0).long() == 1).float()
+                
+                pos_fair_outs = fair_model(pos_embs)
+                neg_fair_outs = fair_model(neg_embs)
+                
+                fairness_loss = F.binary_cross_entropy_with_logits(pos_fair_outs.squeeze(-1), protected_groups_labels_pos) + F.binary_cross_entropy_with_logits(neg_fair_outs.squeeze(-1), protected_groups_labels_neg)
+                
+                fairness_loss.backward(retain_graph=True)
+                print("Gradient sum: fair_model.lins[1].weight.grad.sum()", fair_model.lins[1].weight.grad.sum(), flush=True)
+                
+                loss = neg_losss + pos_losss - (reg_lambda * fairness_loss)
+                total_fair_loss.append(fairness_loss.item())
+                
+                loss.backward()
+                fair_optimizer.step()
+                optimizer.step()
+                
+            else:
+                fair_pred = fair_model(h)
+                
+                fairness_loss = F.binary_cross_entropy_with_logits(fair_pred.squeeze(-1), data.y.float())
+                
+                fairness_loss.backward(retain_graph=True)
+
+                print("Gradient sum: fair_model.lins[1].weight.grad.sum()", fair_model.lins[1].weight.grad.sum(), flush=True)
+                                            
+                loss = neg_losss + pos_losss - (reg_lambda * fairness_loss)
+                total_fair_loss.append(fairness_loss.item())
+                
+                loss.backward()
+                fair_optimizer.step()
+                optimizer.step()
+                
         else:
             loss = neg_losss + pos_losss
-            
-        loss.backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
 
 
         total_loss.append(loss.item())
@@ -129,7 +169,7 @@ def train(model,
 
 
 @torch.no_grad()
-def test(model, predictor, data, split_edge, evaluator, batch_size,
+def test(model, fair_model, predictor, data, split_edge, evaluator, batch_size, link_level,
          use_valedges_as_input):
     model.eval()
     predictor.eval()
@@ -143,53 +183,113 @@ def test(model, predictor, data, split_edge, evaluator, batch_size,
 
     adj = data.adj_t
     h = model(data.x, adj)
+    
+    if not link_level:
+        pos_train_pred = torch.cat([
+            predictor(h, adj, pos_train_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(pos_train_edge.device,
+                                    pos_train_edge.shape[0], batch_size, False)
+        ],
+                                dim=0)
+        
+        
+        neg_train_pred = torch.cat([
+            predictor(h, adj, neg_train_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(neg_train_edge.device,
+                                        neg_train_edge.shape[0], batch_size, False)
+        ],
+                                    dim=0)
 
-    
-    pos_train_pred = torch.cat([
-        predictor(h, adj, pos_train_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(pos_train_edge.device,
-                                 pos_train_edge.shape[0], batch_size, False)
-    ],
-                               dim=0)
-    
-    
-    neg_train_pred = torch.cat([
-        predictor(h, adj, neg_train_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(neg_train_edge.device,
-                                    neg_train_edge.shape[0], batch_size, False)
-    ],
+
+        pos_valid_pred = torch.cat([
+            predictor(h, adj, pos_valid_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(pos_valid_edge.device,
+                                    pos_valid_edge.shape[0], batch_size, False)
+        ],
+                                dim=0)
+        neg_valid_pred = torch.cat([
+            predictor(h, adj, neg_valid_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(neg_valid_edge.device,
+                                    neg_valid_edge.shape[0], batch_size, False)
+        ],
+                                dim=0)
+        if use_valedges_as_input:
+            adj = data.full_adj_t
+            h = model(data.x, adj)
+
+        pos_test_pred = torch.cat([
+            predictor(h, adj, pos_test_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(pos_test_edge.device, pos_test_edge.shape[0],
+                                    batch_size, False)
+        ],
                                 dim=0)
 
+        neg_test_pred = torch.cat([
+            predictor(h, adj, neg_test_edge[perm].t()).squeeze().cpu()
+            for perm in PermIterator(neg_test_edge.device, neg_test_edge.shape[0],
+                                    batch_size, False)
+        ],
+                                dim=0)
+        
+        fair_pred = fair_model(h)
+        fairness_acc = binary_accuracy(torch.sigmoid(fair_pred.view(-1)).cpu(), data.y.float().cpu())
+        fairness_train, fairness_test = fairness_acc, fairness_acc
+        
+    else:
 
-    pos_valid_pred = torch.cat([
-        predictor(h, adj, pos_valid_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(pos_valid_edge.device,
-                                 pos_valid_edge.shape[0], batch_size, False)
-    ],
-                               dim=0)
-    neg_valid_pred = torch.cat([
-        predictor(h, adj, neg_valid_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(neg_valid_edge.device,
-                                 neg_valid_edge.shape[0], batch_size, False)
-    ],
-                               dim=0)
-    if use_valedges_as_input:
-        adj = data.full_adj_t
-        h = model(data.x, adj)
+        pos_train_pred = torch.empty(0)
+        pos_train_fair_pred = torch.empty(0)
+        for perm in PermIterator(pos_train_edge.device, pos_train_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, pos_train_edge[perm].t())
+            pos_train_pred = torch.cat((pos_train_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            pos_train_fair_pred = torch.cat([pos_train_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
 
-    pos_test_pred = torch.cat([
-        predictor(h, adj, pos_test_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(pos_test_edge.device, pos_test_edge.shape[0],
-                                 batch_size, False)
-    ],
-                              dim=0)
+        neg_train_pred = torch.empty(0)
+        neg_train_fair_pred = torch.empty(0)
+        for perm in PermIterator(neg_train_edge.device, neg_train_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, neg_train_edge[perm].t())
+            neg_train_pred = torch.cat((neg_train_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            neg_train_fair_pred = torch.cat([neg_train_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
 
-    neg_test_pred = torch.cat([
-        predictor(h, adj, neg_test_edge[perm].t()).squeeze().cpu()
-        for perm in PermIterator(neg_test_edge.device, neg_test_edge.shape[0],
-                                 batch_size, False)
-    ],
-                              dim=0)
+        pos_valid_pred = torch.empty(0)
+        pos_valid_fair_pred = torch.empty(0)
+        for perm in PermIterator(pos_valid_edge.device, pos_valid_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, pos_valid_edge[perm].t())
+            pos_valid_pred = torch.cat((pos_valid_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            pos_valid_fair_pred = torch.cat([pos_valid_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
+
+        neg_valid_pred = torch.empty(0)
+        neg_valid_fair_pred = torch.empty(0)
+        for perm in PermIterator(neg_valid_edge.device, neg_valid_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, neg_valid_edge[perm].t())
+            neg_valid_pred = torch.cat((neg_valid_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            neg_valid_fair_pred = torch.cat([neg_valid_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
+
+        if use_valedges_as_input:
+            adj = data.full_adj_t
+            h = model(data.x, adj)
+
+        pos_test_pred = torch.empty(0)
+        pos_test_fair_pred = torch.empty(0)
+        for perm in PermIterator(pos_test_edge.device, pos_test_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, pos_test_edge[perm].t())
+            pos_test_pred = torch.cat((pos_test_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            pos_test_fair_pred = torch.cat([pos_test_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
+
+        neg_test_pred = torch.empty(0)
+        neg_test_fair_pred = torch.empty(0)
+        for perm in PermIterator(neg_test_edge.device, neg_test_edge.shape[0], batch_size, False):
+            pred, pred_embs = predictor(h, adj, neg_test_edge[perm].t())
+            neg_test_pred = torch.cat((neg_test_pred.squeeze().cpu(), pred.view(-1).cpu()), dim=0)
+            neg_test_fair_pred = torch.cat([neg_test_fair_pred.cpu(), fair_model(pred_embs).cpu()], dim=0)
+            
+            
+        fair_train_preds, fair_train_labels = torch.cat([pos_train_fair_pred, neg_train_fair_pred]), torch.cat([torch.ones_like(pos_train_fair_pred), torch.zeros_like(neg_train_fair_pred)])
+        fair_valid_preds, fair_valid_labels = torch.cat([pos_valid_fair_pred, neg_valid_fair_pred]), torch.cat([torch.ones_like(pos_valid_fair_pred), torch.zeros_like(neg_valid_fair_pred)])
+        fair_test_preds, fair_test_labels = torch.cat([pos_test_fair_pred, neg_test_fair_pred]), torch.cat([torch.ones_like(pos_test_fair_pred), torch.zeros_like(neg_test_fair_pred)])
+        fairness_train = binary_accuracy(torch.sigmoid(fair_train_preds).cpu(), fair_train_labels.cpu())
+        fairness_valid = binary_accuracy(torch.sigmoid(fair_valid_preds).cpu(), fair_valid_labels.cpu())
+        fairness_test = binary_accuracy(torch.sigmoid(fair_test_preds).cpu(), fair_test_labels.cpu())
     
 
     train_edges = torch.cat([pos_train_edge.t(), neg_train_edge.t()], dim=1)
@@ -249,6 +349,8 @@ def test(model, predictor, data, split_edge, evaluator, batch_size,
     results[f'rep{0}_true_positive_rate_disparity_Train'] = train_tprd.item()
     results[f'rep{0}_true_positive_rate_disparity_Valid'] = val_tprd.item()
     results[f'rep{0}_true_positive_rate_disparity_Test'] = test_tprd.item()
+    results[f'rep{0}_adv_acc_train'] = fairness_train.item()
+    results[f'rep{0}_adv_acc'] = fairness_test.item()
     
     return results, h.cpu(), saved_output
 
@@ -258,6 +360,7 @@ def parseargs():
     parser.add_argument('--use_valedges_as_input', action='store_true', help="whether to add validation edges to the input adjacency matrix of gnn")
     parser.add_argument('--epochs', type=int, default=40, help="number of epochs")
     parser.add_argument('--runs', type=int, default=3, help="number of repeated runs")
+    parser.add_argument('--device', type=int, default=0, help="which device to use to run the process")
     parser.add_argument('--dataset', type=str, default="collab")
     
     parser.add_argument('--batch_size', type=int, default=8192, help="batch size")
@@ -321,12 +424,13 @@ def parseargs():
     
     parser.add_argument("--no_intervention", action="store_true", help="removes the intervention model")
     
+    parser.add_argument("--link_level", action="store_true", help="link level fair model prediction")
+    
+    parser.add_argument("--node_split", action="store_true", help="wandb sweep")
     
     parser.add_argument("--no_wandb", action="store_true", help="no wandb")
     parser.add_argument("--wandb_sweep", action="store_true", help="wandb sweep")
-    
-
-    
+   
     # not used in experiments
     parser.add_argument('--cnprob', type=float, default=0)
     args = parser.parse_args()
@@ -339,6 +443,7 @@ def main():
     
     dataset_path = {
         'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
+        'facebook_graphair': "/home/jrm28/fairness/graphair/fairgraph/method/checkpoint/out/AUGMENTED_facebook_10000_epochs_2024-03-13_14-50-37/splits.pt",
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
         'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
         'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
@@ -350,26 +455,28 @@ def main():
     writer = SummaryWriter(f"./rec/{args.model}_{args.predictor}")
     writer.add_text("hyperparams", hpstr)
 
-    if args.dataset in ["Cora", "Citeseer", "Pubmed", "facebook", "gplus", "sbm", "sbm_medium", "sbm_bigger"]:
-        evaluator = Evaluator(name=f'ogbl-ppa')
-    else:
-        evaluator = Evaluator(name=f'ogbl-{args.dataset}')
+    evaluator = Evaluator(name=f'ogbl-ppa')
 
-    device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu')
+    # device = torch.cuda.set_device(0)
+    # device='cpu'
     
-    dataset_file = f"dataset/splits/{args.dataset}.pt" 
+    dataset_file = f"dataset/splits/{args.dataset}{'_node_split' if args.node_split else ''}.pt" 
     if os.path.isfile(dataset_file):
         data, split_edge = torch.load(dataset_file)
     else:
-        data, split_edge = loaddataset(args.dataset, args.use_valedges_as_input, args.load)
+        data, split_edge = loaddataset(args.dataset, dataset_path, args.use_valedges_as_input, args.load, args)
         torch.save((data, split_edge), dataset_file)
     
     data = data.to(device)
 
-    predfn = predictor_dict[args.predictor]
+    predictor_name = args.predictor 
+    predictor_name += "_mod" if args.link_level else ""
+
+    predfn = predictor_dict[predictor_name]
     if args.predictor != "cn0":
         predfn = partial(predfn, cndeg=args.cndeg)
-    if args.predictor in ["cn1", "incn1cn1", "scn1", "catscn1", "sincn1cn1"]:
+    if args.predictor in ["cn1", "cn1_mod", "incn1cn1", "scn1", "catscn1", "sincn1cn1"]:
         predfn = partial(predfn, use_xlin=args.use_xlin, tailact=args.tailact, twolayerlin=args.twolayerlin, beta=args.beta)
     if args.predictor == "incn1cn1":
         predfn = partial(predfn, depth=args.depth, splitsize=args.splitsize, scale=args.probscale, offset=args.proboffset, trainresdeg=args.trndeg, testresdeg=args.tstdeg, pt=args.pt, learnablept=args.learnpt, alpha=args.alpha)
@@ -379,7 +486,16 @@ def main():
     for run in range(0, args.runs):
     
         run_name = '[No Intervention] - ' if args.no_intervention else ''
-        run_name += f'{"NCN" if args.predictor == "cn1" else "NCNC"}_{args.dataset}'
+        # run_name += f'{"NCN" if args.predictor == "cn1" else "NCNC"}_{args.dataset}'
+        if args.predictor == "cn1":
+            run_name += f'{"NCN"}_{args.dataset}'
+        elif args.predictor == "cn0":
+            run_name += f'{"GAE"}_{args.dataset}'
+        else:
+            run_name += f'{"NCNC"}_{args.dataset}'
+            
+        run_name += "_link_level" if args.link_level else ""
+        run_name += "_node_split" if args.node_split else ""
         wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=run_name, mode="online" if not args.no_wandb else "disabled")
 
         artifact = wandb.Artifact(args.dataset, type="dataset")
@@ -426,18 +542,21 @@ def main():
         
         fair_optimizer = torch.optim.Adam(fair_model.parameters(), lr=args.adv_lr)
         
+        model = model.to(device)
+        fair_model = fair_model.to(device)
+        predictor = predictor.to(device)
         for epoch in range(1, 1 + args.epochs):
             alpha = max(0, min((epoch-5)*0.1, 1)) if args.increasealpha else None
             t1 = time.time()
             print("training")
             loss, fair_loss = train(model, fair_model, predictor, data, split_edge, optimizer, fair_optimizer,
-                         args.batch_size, args.reg_lambda, args.no_intervention, args.maskinput, [], alpha)
+                         args.batch_size, args.reg_lambda, args.no_intervention, args.link_level, args.maskinput, [], alpha)
             print("after training")
             print(f"trn time {time.time()-t1:.2f} s", flush=True)
             if True:
                 t1 = time.time()
-                results, h, saved_output = test(model, predictor, data, split_edge, evaluator,
-                               args.testbs, args.use_valedges_as_input)
+                results, h, saved_output = test(model, fair_model, predictor, data, split_edge, evaluator,
+                               args.testbs, args.link_level, args.use_valedges_as_input)
                 print(f"test time {time.time()-t1:.2f} s")
                 
                 print(results, flush=True)
@@ -476,6 +595,8 @@ def main():
                 "rep0_true_positive_rate_disparity_Train": results["rep0_true_positive_rate_disparity_Train"],
                 "rep0_true_positive_rate_disparity_Valid": results["rep0_true_positive_rate_disparity_Valid"],
                 "rep0_true_positive_rate_disparity_Test": results["rep0_true_positive_rate_disparity_Test"],
+                f'rep{0}_adv_acc_train': results[f'rep{0}_adv_acc_train'],
+                f'rep{0}_adv_acc': results[f'rep{0}_adv_acc'],
                 "epoch_step" : epoch - 1
             })
             

@@ -20,6 +20,10 @@ from src.utils import ROOT_DIR, get_same_source_negs
 from src.lcc import get_largest_connected_component, remap_edges, get_node_mapper
 from src.datasets.seal import get_train_val_test_datasets
 from src.datasets.elph import get_hashed_train_val_test_datasets, make_train_eval_data
+import numpy as np
+import random
+
+from torch_geometric.utils import negative_sampling, add_self_loops, train_test_split_edges
 
 
 def get_loaders(args, dataset, splits, directed):
@@ -58,14 +62,74 @@ def get_loaders(args, dataset, splits, directed):
     return train_loader, train_eval_loader, val_loader, test_loader
 
 
-def get_gelato_data(splits, dataset_name):
-    gelato_dataset_splits_dir = '/home/jrm28/sparse_gelato/processed_splits'
+def split_dataset_gelato(data, valid_ratio=0.05, test_ratio=0.1, random_seed=0, heart_splits=None):
+    """
+    Split the edges/nonedges for biased training, full training, (full) validation and (full) testing.
 
-    gelato_splits_file = list(filter(lambda x: dataset_name.lower() in x.lower(), os.listdir(gelato_dataset_splits_dir)))[0]
+    :param data: PyG dataset data.
+    :param valid_ratio: ratio of validation edges.
+    :param test_ratio: ratio of test edges.
+    :param random_seed: random seed for the split.
+    :return: edge splits
+    """
+    
+    def set_random_seed(random_seed):
+        """
+        Set the random seed.
+        :param random_seed: Seed to be set.
+        """
+        torch.manual_seed(random_seed)
+        np.random.seed(random_seed)
+        random.seed(random_seed)
+    
+    set_random_seed(random_seed)
+    n = data.num_nodes
 
-    print(f">>> Reading {os.path.join(gelato_dataset_splits_dir, gelato_splits_file)}")
+    if heart_splits:
+        from types import SimpleNamespace
+        split_data = SimpleNamespace(train_pos_edge_index=heart_splits['train']['edge'].t(), val_pos_edge_index=heart_splits['valid']['edge'].t(), test_pos_edge_index=heart_splits['test']['edge'].t(), num_nodes=n)
 
-    gelato_splits = torch.load(os.path.join(gelato_dataset_splits_dir, gelato_splits_file))
+    else:
+        split_data = train_test_split_edges(data, valid_ratio, test_ratio)
+
+
+    split_edge = {'biased_train': {}, 'valid': {}, 'test': {}, 'train': {}}
+
+    # Biased training with negative sampling.
+    split_edge['biased_train']['edge'] = split_data.train_pos_edge_index.t()
+    edge_index, _ = add_self_loops(split_data.train_pos_edge_index)  # To avoid negative sampling of self loops.
+    split_data.train_neg_edge_index = negative_sampling(
+        edge_index, num_nodes=split_data.num_nodes,
+        num_neg_samples=split_data.train_pos_edge_index.size(1))
+    split_edge['biased_train']['edge_neg'] = split_data.train_neg_edge_index.t()
+
+    # Full training with all negative pairs in the training graph (including validation and testing positive edges).
+    split_edge['train']['edge'] = split_data.train_pos_edge_index.t()
+    train_edge_neg_mask = torch.ones((n, n), dtype=bool)
+    train_edge_neg_mask[tuple(split_edge['train']['edge'].t().tolist())] = False
+    train_edge_neg_mask = torch.triu(train_edge_neg_mask, 1)
+    split_edge['train']['edge_neg'] = torch.nonzero(train_edge_neg_mask)
+
+    # Full validation with all negative pairs in the training graph (including testing positive edges, excluding validation positive edges).
+    split_edge['valid']['edge'] = split_data.val_pos_edge_index.t()
+    valid_edge_neg_mask = train_edge_neg_mask.clone()
+    valid_edge_neg_mask[tuple(split_edge['valid']['edge'].t().tolist())] = False
+    split_edge['valid']['edge_neg'] = torch.nonzero(valid_edge_neg_mask)
+
+    # Full testing with all negative pairs in the training graph (excluding validation and testing positive edges).
+    split_edge['test']['edge'] = split_data.test_pos_edge_index.t()
+    test_edge_neg_mask = valid_edge_neg_mask.clone()
+    test_edge_neg_mask[tuple(split_edge['test']['edge'].t().tolist())] = False
+    split_edge['test']['edge_neg'] = torch.nonzero(test_edge_neg_mask)
+
+    return split_edge
+
+
+def get_gelato_data(splits, data):
+
+    print(f">>> Processing gelato splits")
+
+    gelato_splits = split_dataset_gelato(data)
 
     splits['train'].edge_label = torch.hstack([torch.ones(gelato_splits['train']['edge'].shape[0]), torch.zeros(gelato_splits['train']['edge_neg'].shape[0])])
     splits['train'].edge_label_index = torch.vstack([gelato_splits['train']['edge'], gelato_splits['train']['edge_neg']]).t()
@@ -84,6 +148,52 @@ def get_gelato_data(splits, dataset_name):
 
     return splits
 
+def get_ncnc_data(args):
+    
+    dataset_file = f"/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/{args.dataset_name}.pt" 
+    if os.path.isfile(dataset_file):
+        ncnc_data, ncnc_splits = torch.load(dataset_file, map_location=torch.device('cpu'))
+    else:
+        print("COULD NOT FIND NCNC SPLITS --- QUITTING")
+        quit()
+        
+    device = torch.device(f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu')
+        
+    # This RandomLinkSplit is useless.
+    # We just use it to generate the data structure required by BUDDY.
+    val_pct = args.val_pct
+    test_pct = args.test_pct
+    transform = RandomLinkSplit(is_undirected=False, num_val=val_pct, num_test=test_pct,
+                                    add_negative_train_samples=True)
+    train_data, val_data, test_data = transform(ncnc_data)
+    splits = {'train': train_data, 'valid': val_data, 'test': test_data}
+    
+    splits['train'].edge_label = torch.hstack([torch.ones(ncnc_splits['train']['edge'].shape[0]), torch.zeros(ncnc_splits['train']['edge_neg'].shape[0])])
+    splits['train'].edge_label_index = torch.hstack([ncnc_splits['train']['edge'].t().to('cpu'), ncnc_splits['train']['edge_neg'].t().to('cpu')])
+    splits['train'].edge_index = ncnc_data.edge_index.to('cpu')
+    splits['train'].edge_weight = torch.ones(ncnc_data.edge_index.shape[1], dtype=int).to('cpu')
+    
+    splits['valid'].edge_label = torch.hstack([torch.ones(ncnc_splits['valid']['edge'].shape[0]), torch.zeros(ncnc_splits['valid']['edge_neg'].shape[0])])
+    splits['valid'].edge_label_index = torch.hstack([ncnc_splits['valid']['edge'].t().to('cpu'), ncnc_splits['valid']['edge_neg'].t().to('cpu')])
+    splits['valid'].edge_index = ncnc_data.edge_index.to('cpu')
+    splits['valid'].edge_weight = torch.ones(ncnc_data.edge_index.shape[1], dtype=int).to('cpu')
+    
+    splits['test'].edge_label = torch.hstack([torch.ones(ncnc_splits['test']['edge'].shape[0]), torch.zeros(ncnc_splits['test']['edge_neg'].shape[0])])
+    splits['test'].edge_label_index = torch.hstack([ncnc_splits['test']['edge'].t().to('cpu'), ncnc_splits['test']['edge_neg'].t().to('cpu')])
+    splits['test'].edge_index = ncnc_data.edge_index.to('cpu')
+    splits['test'].edge_weight = torch.ones(ncnc_data.edge_index.shape[1], dtype=int).to('cpu')
+    
+    for i in ['train', 'valid', 'test']:
+        splits[i].edge_label = splits[i].edge_label.to('cpu')
+        splits[i].edge_label_index = splits[i].edge_label_index.to('cpu')
+        splits[i].edge_index = splits[i].edge_index.to('cpu')
+        splits[i].edge_weight = splits[i].edge_weight.to('cpu')
+        
+    ncnc_data = ncnc_data.to('cpu')
+    
+    
+    return ncnc_data, splits
+    
 
 def get_data(args, dataset_path):
     """
@@ -97,46 +207,55 @@ def get_data(args, dataset_path):
     :param args: arguments Namespace object
     :return: dataset, dic splits, bool directed, str eval_metric
     """
-    include_negatives = True
-    dataset_name = args.dataset_name
-    val_pct = args.val_pct
-    test_pct = args.test_pct
-    use_lcc_flag = True
-    directed = False
+        
     eval_metric = 'hits'
-    path = os.path.join(ROOT_DIR, 'dataset', dataset_name)
-    print(f'reading data from: {path}')
-    # if dataset_name.startswith('ogbl'):
-    use_lcc_flag = False
-    data = torch.load(dataset_path)
-    # if dataset_name == 'ogbl-ddi':
-    # dataset.data.x = torch.ones((dataset.data.num_nodes, 1))
+    directed = False
     
-    data.edge_weight = torch.ones(data.edge_index.size(1), dtype=int)
-    # else:
-    #     dataset = Planetoid(path, dataset_name)
+    if args.ncnc_splits:
+        data, splits = get_ncnc_data(args)
+    else:
+        include_negatives = True
+        dataset_name = args.dataset_name
+        val_pct = args.val_pct
+        test_pct = args.test_pct
+        use_lcc_flag = True
+        directed = False
+        eval_metric = 'hits'
+        path = os.path.join(ROOT_DIR, 'dataset', dataset_name)
+        print(f'reading data from: {path}')
+        # if dataset_name.startswith('ogbl'):
+        use_lcc_flag = False
+        data = torch.load(dataset_path)
+        # if dataset_name == 'ogbl-ddi':
+        # dataset.data.x = torch.ones((dataset.data.num_nodes, 1))
+        
+        data.edge_weight = torch.ones(data.edge_index.size(1), dtype=int)
+        # else:
+        #     dataset = Planetoid(path, dataset_name)
 
-    # set the metric
-    if dataset_name.startswith('ogbl-citation'):
-        eval_metric = 'mrr'
-        directed = True
+        # set the metric
+        if dataset_name.startswith('ogbl-citation'):
+            eval_metric = 'mrr'
+            directed = True
 
-    # if use_lcc_flag:
-    #     dataset = use_lcc(dataset)
+        # if use_lcc_flag:
+        #     dataset = use_lcc(dataset)
 
-    undirected = not directed
+        undirected = not directed
 
-    transform = RandomLinkSplit(is_undirected=undirected, num_val=val_pct, num_test=test_pct,
-                                add_negative_train_samples=include_negatives)
-    train_data, val_data, test_data = transform(data)
-    splits = {'train': train_data, 'valid': val_data, 'test': test_data}
+        transform = RandomLinkSplit(is_undirected=undirected, num_val=val_pct, num_test=test_pct,
+                                    add_negative_train_samples=include_negatives)
+        train_data, val_data, test_data = transform(data)
+        
+        splits = {'train': train_data, 'valid': val_data, 'test': test_data}
+        
+        '''
+        Gelato splits are added here.
+        '''
+        if args.full_training:
+            splits = get_gelato_data(splits, data)
 
-
-    # '''
-    # Gelato splits are added here.
-    # '''
-    # splits = get_gelato_data(splits, dataset_name)
-
+        
     return data, splits, directed, eval_metric
 
 

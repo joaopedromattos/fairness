@@ -20,6 +20,7 @@ import code
 
 from src.evaluation import true_positive_rate_disparity
 
+
 def get_train_func(args):
     if args.model == 'ELPH':
         return train_elph
@@ -40,6 +41,7 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
     total_loss = 0
     lp_total_loss = 0
     adv_total_loss = 0
+    adv_loss = None
     data = train_loader.dataset
     # hydrate edges
     links = data.links
@@ -49,13 +51,13 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
     sample_indices = torch.randperm(len(labels))[:train_samples]
     links = links[sample_indices]
     labels = labels[sample_indices]
+            
 
     if args.wandb:
         wandb.log({"train_total_batches": len(train_loader)})
     batch_processing_times = []
     loader = DataLoader(range(len(links)), args.batch_size, shuffle=True)
     for batch_count, indices in enumerate(tqdm(loader)):
-        
         
         # do node level things
         if model.node_embedding is not None:
@@ -73,8 +75,10 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
             subgraph_features = data.subgraph_features[sf_indices].to(device)
         else:
             subgraph_features = torch.zeros(data.subgraph_features[indices].shape).to(device)
-        node_features = data.x[curr_links].to(device)
+            
+        node_features = data.x.to(device)
         degrees = data.degrees[curr_links].to(device)
+        
         if args.use_RA:
             ra_indices = sample_indices[indices]
             RA = data.RA[ra_indices].to(device)
@@ -85,7 +89,7 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
         optimizer.zero_grad()
         adv_optimizer.zero_grad()
         
-        logits, before_logits = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb)
+        logits, before_logits, node_embs = model(subgraph_features, node_features, degrees[:, 0], degrees[:, 1], RA, batch_emb, curr_links)
         lp_loss = get_loss(args.loss)(logits, labels[indices].squeeze(0).to(device))
         
         if args.no_intervention:
@@ -100,34 +104,54 @@ def train_buddy(model, adv_model, optimizer, adv_optimizer, train_loader, args, 
             
         elif args.tpr_loss:
             
-            adv_logits = adv_model(before_logits.detach().clone())
+            adv_logits = adv_model(emb)
         
             protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
             
             adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels) - true_positive_rate_disparity(labels[indices].squeeze(0).to(device).detach(), logits.detach(), protected_groups_labels.detach()).abs()
             
-            adv_loss.backward()
+            adv_loss.backward(retain_graph=True)
             
-            adv_optimizer.step()
+            # adv_optimizer.step()
             
-            loss = lp_loss - (args.reg_lambda * adv_loss.item())
+            loss = lp_loss - (args.reg_lambda * adv_loss)
             
             adv_total_loss += adv_loss.item() * args.batch_size
             
+        elif args.node_level:
+
+            adv_labels = data.protected.float().to(device)
+            adv_logits = adv_model(node_embs)
+            
+            adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), adv_labels)
+            
+            adv_loss.backward(retain_graph=True)
+            # adv_optimizer.step()
+            
+            loss = lp_loss - (args.reg_lambda * adv_loss)
+            
+            adv_total_loss += adv_loss.item() * args.batch_size
+
         else:
-            adv_logits = adv_model(before_logits.detach().clone())
+            
+            
+            adv_logits = adv_model(before_logits)
         
             protected_groups_labels = (data.protected[curr_links].sum(1).long() == 1).float().to(device)
             adv_loss = F.binary_cross_entropy_with_logits(adv_logits.view(-1), protected_groups_labels)
             
-            adv_loss.backward()
-            adv_optimizer.step()
+            adv_loss.backward(retain_graph=True)
+            # adv_optimizer.step()
             
-            loss = lp_loss - (args.reg_lambda * adv_loss.item())
+            loss = lp_loss - (args.reg_lambda * adv_loss)
             
             adv_total_loss += adv_loss.item() * args.batch_size
         
         loss.backward()
+        
+        if adv_loss is not None:
+            adv_optimizer.step()
+        
         optimizer.step()
         
         lp_total_loss += lp_loss.item() * args.batch_size

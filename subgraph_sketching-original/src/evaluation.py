@@ -111,7 +111,7 @@ def normalized_precision_at_k(eval_true, eval_pred, eval_groups, k):
         k = len(eval_pred)
     
     eval_top_index = torch.topk(eval_pred, k, sorted=False).indices.cpu()
-    
+
     eval_intra_group = (eval_groups[eval_top_index] == 0).sum()
     eval_inter_group = (eval_groups[eval_top_index] == 1).sum()
     
