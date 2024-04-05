@@ -442,8 +442,9 @@ def main():
     
     
     dataset_path = {
-        'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
+        'facebook': '/home/jrm28/fairness/data/graphs/facebook_1684.pt',
         'facebook_graphair': "/home/jrm28/fairness/graphair/fairgraph/method/checkpoint/out/AUGMENTED_facebook_10000_epochs_2024-03-13_14-50-37/splits.pt",
+        'facebook_nifty': "/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/facebook_nifty.pt",
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
         'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
         'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
@@ -461,7 +462,7 @@ def main():
     # device = torch.cuda.set_device(0)
     # device='cpu'
     
-    dataset_file = f"dataset/splits/{args.dataset}{'_node_split' if args.node_split else ''}.pt" 
+    dataset_file = f"/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/{args.dataset}{'_node_split' if args.node_split else ''}.pt" 
     if os.path.isfile(dataset_file):
         data, split_edge = torch.load(dataset_file)
     else:
@@ -562,19 +563,19 @@ def main():
                 print(results, flush=True)
                 
                 timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-                torch.save(saved_output, f"saved_output/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}_{epoch}{timestamp}.pt")
+                torch.save(saved_output, f"/home/jrm28/fairness/NeuralCommonNeighbor/saved_output/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}_{epoch}{timestamp}.pt")
 
                 if True:
                     
                     if bestscore is None or bestscore[f"rep{0}_ValHits@{100}"] < results[f"rep{0}_ValHits@{100}"]:
                         train_hits, valid_hits, test_hits = results[f'rep{0}_TrainHits@{100}'], results[f'rep{0}_ValHits@{100}'], results[f'rep{0}_TestHits@{100}']
                         if args.save_gemb:
-                            torch.save(h, f"gemb/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}.pt")
+                            torch.save(h, f"/home/jrm28/fairness/NeuralCommonNeighbor/gemb/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}.pt")
                         if args.savex:
-                            torch.save(model.xemb[0].weight.detach(), f"gemb/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pt")
+                            torch.save(model.xemb[0].weight.detach(), f"/home/jrm28/fairness/NeuralCommonNeighbor/gemb/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pt")
                         if args.savemod:
-                            torch.save(model.state_dict(), f"gmodel/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pt")
-                            torch.save(predictor.state_dict(), f"gmodel/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pre.pt")
+                            torch.save(model.state_dict(), f"/home/jrm28/fairness/NeuralCommonNeighbor/gmodel/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pt")
+                            torch.save(predictor.state_dict(), f"/home/jrm28/fairness/NeuralCommonNeighbor/gmodel/{args.dataset}_{args.model}_{args.predictor}_{args.hiddim}_{run}.pre.pt")
                     print(f'Run: {run + 1:02d}, '
                             f'Epoch: {epoch:02d}, '
                             f'Loss: {loss:.4f}, '

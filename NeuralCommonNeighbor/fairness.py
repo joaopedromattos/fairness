@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class FairLearner(nn.Module):
-    def __init__(self, input_channels:int, hidden_channels:int=2, hidden_layers:int=2) -> None:
+    def __init__(self, input_channels:int, hidden_channels:int=2, hidden_layers:int=2, out_channels:int=1) -> None:
         super(FairLearner, self).__init__()
         self.input_channels = input_channels
         self.hidden_channels = hidden_channels
         self.hidden_layers = hidden_layers
+        self.out_channels = out_channels
         
         self.lins = nn.ModuleList([nn.Linear(self.input_channels, self.hidden_channels)])
         
@@ -18,7 +19,7 @@ class FairLearner(nn.Module):
         # 0 = no sensitive nodes
         # 1 = at least one sensitive node
         # 2 = both sensitive nodes
-        self.lins.append(nn.Linear(self.hidden_channels, 1))
+        self.lins.append(nn.Linear(self.hidden_channels, self.out_channels))
         
     def forward(self, batch):
         x = batch

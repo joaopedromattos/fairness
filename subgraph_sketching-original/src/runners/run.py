@@ -43,7 +43,7 @@ def run():
     
     dataset_path = {
         'facebook': '/home/jrm28/fairness/subgraph_sketching-original/dataset/ego-facebook/processed/facebook_1684.pt',
-        'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
+        'gplus': '/home/jrm28/fairness/NeuralCommonNeighbor/dataset/gplus/processed/gplus_111091089527727420853.pt',
         'facebook_graphair': f"/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/facebook_graphair.pt",
         'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
         'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
