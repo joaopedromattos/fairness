@@ -14,3 +14,4 @@ data
 gemb
 gmodel
 PyGDebias
+cummulative_effect/common_neighbors_out/*

@@ -5,7 +5,15 @@ from torch_geometric.data import Data
 import argparse
 import torch
 import numpy as np
+from tqdm import tqdm
 from torch_geometric.utils import convert
+from torch_sparse import SparseTensor
+
+def mask_graphair(old_split_edge, new_edge_index):
+    mask = torch.zeros(new_edge_index.size(1), dtype=torch.bool).cpu()
+    for edge in tqdm(old_split_edge):
+        mask |= ((edge[0] == new_edge_index).any(0) & (edge[1] == new_edge_index).any(0))           
+    return mask
 
 # arguments
 parser = argparse.ArgumentParser()
@@ -85,7 +93,12 @@ elif args.model == "EDITS":
         idx_val)
    
     edge_index, x = convert.from_scipy_sparse_matrix(model.adj1)[0], model.X_debiased
+
+    mask = mask_graphair(torch.cat([splits['train']['edge_neg'], splits['valid']['edge_neg'], splits['test']['edge_neg'], splits['valid']['edge'], splits['test']['edge']]).cpu(), edge_index.cpu())
+    edge_index = edge_index[:, mask]
+
+    data.edge_index, data.adj_t, data.x = edge_index.float(), SparseTensor.from_edge_index(edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).float(), x.float()
+
     
-    data.edge_index, data.x = edge_index, x
 
 torch.save((data, splits), f'/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/{args.dataset}_{args.model.lower()}.pt')

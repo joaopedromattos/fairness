@@ -19,7 +19,7 @@ from fairness import FairLearner
 
 import wandb
 
-from evaluation import true_positive_rate_disparity
+from evaluation import true_positive_rate_disparity, positive_rate_disparity
 import datetime
 
 import os
@@ -103,31 +103,47 @@ def train(model,
                                                     adj,
                                                     edge,
                                                     cndropprobs=cnprobs)
-
-            pos_losss = -F.logsigmoid(pos_outs).mean()
             edge = negedge[:, perm]
             neg_outs = predictor.multidomainforward(h, adj, edge, cndropprobs=cnprobs)
-            neg_losss = -F.logsigmoid(-neg_outs).mean()
         else:
             pos_outs, pos_embs = predictor.multidomainforward(h,
                                                     adj,
                                                     edge,
                                                     cndropprobs=cnprobs)
-
-            pos_losss = -F.logsigmoid(pos_outs).mean()
             edge = negedge[:, perm]
             neg_outs, neg_embs = predictor.multidomainforward(h, adj, edge, cndropprobs=cnprobs)
-            neg_losss = -F.logsigmoid(-neg_outs).mean()
+
+        pos_losss = -F.logsigmoid(pos_outs).mean()
+        neg_losss = -F.logsigmoid(-neg_outs).mean()
             
         if not no_intervention:
             if link_level:
                 protected_groups_labels_pos = (data.y[pos_train_edge[:, perm]].sum(0).long() == 1).float()
                 protected_groups_labels_neg = (data.y[negedge[:, perm]].sum(0).long() == 1).float()
                 
+                # Following Tip #1 from https://github.com/soumith/ganhacks?tab=readme-ov-file
+                pos_embs = F.tanh(pos_embs)
+                neg_embs = F.tanh(neg_embs)
+                
                 pos_fair_outs = fair_model(pos_embs)
                 neg_fair_outs = fair_model(neg_embs)
                 
-                fairness_loss = F.binary_cross_entropy_with_logits(pos_fair_outs.squeeze(-1), protected_groups_labels_pos) + F.binary_cross_entropy_with_logits(neg_fair_outs.squeeze(-1), protected_groups_labels_neg)
+                if args.laftr_dp:
+                    sens_groups = torch.cat([protected_groups_labels_pos, protected_groups_labels_neg])
+                    sens_preds = torch.cat([pos_fair_outs, neg_fair_outs]).flatten()
+                    sens_group_proportion = 1 / sens_groups.sum()
+                    non_sensitive_group_proportion = 1 - sens_group_proportion
+                    fairness_loss = 1 - (sens_group_proportion*torch.abs(sens_preds[sens_groups.bool()] - sens_groups[sens_groups.bool()])).sum() + (non_sensitive_group_proportion*torch.abs(sens_preds[~sens_groups.bool()] - sens_groups[~sens_groups.bool()])).sum()
+                elif args.laftr_eo:
+                    pos_fair_outs = pos_fair_outs.flatten()
+                    sens_group_pos = protected_groups_labels_pos[protected_groups_labels_pos == 1]
+                    non_sens_group_pos = protected_groups_labels_pos[protected_groups_labels_pos == 0]
+                    sens_group_pos_proportion = 1 / sens_group_pos.shape[0]
+                    non_sens_group_pos_proportion = 1 / non_sens_group_pos.shape[0]
+                    fairness_loss = 2 - (sens_group_pos_proportion * torch.abs(pos_fair_outs[protected_groups_labels_pos.bool()] - sens_group_pos)).sum() + (non_sens_group_pos_proportion * torch.abs(pos_fair_outs[~protected_groups_labels_pos.bool()] - non_sens_group_pos)).sum()
+                    # import code; code.interact(local={**locals(), **globals()})
+                else:
+                    fairness_loss = F.binary_cross_entropy_with_logits(pos_fair_outs.squeeze(-1), protected_groups_labels_pos) + F.binary_cross_entropy_with_logits(neg_fair_outs.squeeze(-1), protected_groups_labels_neg)
                 
                 fairness_loss.backward(retain_graph=True)
                 print("Gradient sum: fair_model.lins[1].weight.grad.sum()", fair_model.lins[1].weight.grad.sum(), flush=True)
@@ -136,10 +152,21 @@ def train(model,
                 total_fair_loss.append(fairness_loss.item())
                 
                 loss.backward()
+                
+                if args.laftr_eo:
+                    # For WGAN it is very common to apply the gradient clipping trick.
+                    # We need this to make it 1-Lipschitz
+                    torch.nn.utils.clip_grad_norm_(fair_model.parameters(),0.1)
+                    torch.nn.utils.clip_grad_norm_(predictor.parameters(),0.1)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(),0.1)
+                    # pass
+                    
                 fair_optimizer.step()
                 optimizer.step()
                 
             else:
+                # Following Tip #1 from https://github.com/soumith/ganhacks?tab=readme-ov-file
+                h = F.tanh(h)
                 fair_pred = fair_model(h)
                 
                 fairness_loss = F.binary_cross_entropy_with_logits(fair_pred.squeeze(-1), data.y.float())
@@ -312,6 +339,11 @@ def test(model, fair_model, predictor, data, split_edge, evaluator, batch_size, 
     val_tprd = true_positive_rate_disparity(val_labels, val_preds, val_protected_groups_labels.detach()).abs()
     test_tprd = true_positive_rate_disparity(test_labels, test_preds, test_protected_groups_labels.detach()).abs()
     
+    # import code; code.interact(local={**locals(), **globals()})
+    train_prd = positive_rate_disparity(train_preds, train_protected_groups_labels.detach()).abs()
+    val_prd = positive_rate_disparity(val_preds, val_protected_groups_labels.detach()).abs()
+    test_prd = positive_rate_disparity(test_preds, test_protected_groups_labels.detach()).abs()
+    
     saved_output = {
         'train_preds': train_preds,
         'train_true': train_labels,
@@ -327,7 +359,7 @@ def test(model, fair_model, predictor, data, split_edge, evaluator, batch_size, 
     results = {}
     for K in [20, 50, 100]:
         evaluator.K = K
-
+        
         train_hits = evaluator.eval({
             'y_pred_pos': pos_train_pred,
             'y_pred_neg': neg_valid_pred,
@@ -341,7 +373,12 @@ def test(model, fair_model, predictor, data, split_edge, evaluator, batch_size, 
             'y_pred_pos': pos_test_pred,
             'y_pred_neg': neg_test_pred,
         })[f'hits@{K}']
-
+        
+        # top_k_pairs = torch.argsort(train_preds)[:K]
+        # results[f'rep{0}_TrainSens@{K}'] = train_protected_groups_labels[top_k_pairs].sum() / train_protected_groups_labels.sum()
+        # results[f'rep{0}_ValidSens@{K}'] = val_protected_groups_labels[top_k_pairs].sum() / val_protected_groups_labels.sum()
+        # results[f'rep{0}_TestSens@{K}'] = test_protected_groups_labels[top_k_pairs].sum() / test_protected_groups_labels.sum()
+        
         results[f'rep{0}_TrainHits@{K}'] = train_hits
         results[f'rep{0}_ValHits@{K}'] = valid_hits
         results[f'rep{0}_TestHits@{K}'] = test_hits
@@ -349,6 +386,11 @@ def test(model, fair_model, predictor, data, split_edge, evaluator, batch_size, 
     results[f'rep{0}_true_positive_rate_disparity_Train'] = train_tprd.item()
     results[f'rep{0}_true_positive_rate_disparity_Valid'] = val_tprd.item()
     results[f'rep{0}_true_positive_rate_disparity_Test'] = test_tprd.item()
+    
+    results[f'rep{0}_positive_rate_disparity_Train'] = train_prd.item()
+    results[f'rep{0}_positive_rate_disparity_Valid'] = val_prd.item()
+    results[f'rep{0}_positive_rate_disparity_Test'] = test_prd.item()
+    
     results[f'rep{0}_adv_acc_train'] = fairness_train.item()
     results[f'rep{0}_adv_acc'] = fairness_test.item()
     
@@ -426,7 +468,10 @@ def parseargs():
     
     parser.add_argument("--link_level", action="store_true", help="link level fair model prediction")
     
-    parser.add_argument("--node_split", action="store_true", help="wandb sweep")
+    parser.add_argument("--node_split", action="store_true", help="Instead of enforcing link fairness, it enforces node fairness")
+    
+    parser.add_argument("--laftr_dp", action="store_true", help="Implements LAFTR loss for Demografic Parity")
+    parser.add_argument("--laftr_eo", action="store_true", help="Implements LAFTR loss for Equality of Opportunity")
     
     parser.add_argument("--no_wandb", action="store_true", help="no wandb")
     parser.add_argument("--wandb_sweep", action="store_true", help="wandb sweep")
@@ -445,6 +490,7 @@ def main():
         'facebook': '/home/jrm28/fairness/data/graphs/facebook_1684.pt',
         'facebook_graphair': "/home/jrm28/fairness/graphair/fairgraph/method/checkpoint/out/AUGMENTED_facebook_10000_epochs_2024-03-13_14-50-37/splits.pt",
         'facebook_nifty': "/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/facebook_nifty.pt",
+        'facebook_edits': "/home/jrm28/fairness/NeuralCommonNeighbor/dataset/splits/facebook_edits.pt",
         'gplus': '/home/jrm28/fairness/subgraph_sketching-original/dataset/gplus/processed/gplus_100129275726588145876.pt',
         'sbm': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm.pt',
         'sbm_medium': '/home/jrm28/fairness/subgraph_sketching-original/dataset/sbm/processed/sbm_medium.pt',
@@ -497,6 +543,8 @@ def main():
             
         run_name += "_link_level" if args.link_level else ""
         run_name += "_node_split" if args.node_split else ""
+        run_name += "_laftr_dp" if "_link_level" in run_name and args.laftr_dp else ""
+        run_name += "_laftr_eo" if "_link_level" in run_name and args.laftr_eo else ""
         wandb_run = wandb.init(project="lpfairness", entity="joaopedromattos", config=args, name=run_name, mode="online" if not args.no_wandb else "disabled")
 
         artifact = wandb.Artifact(args.dataset, type="dataset")
@@ -593,9 +641,15 @@ def main():
                 "rep0_TrainHits@100": results[f'rep{0}_TrainHits@{100}'],
                 "rep0_ValHits@100": results[f'rep{0}_ValHits@{100}'],
                 "rep0_TestHits@100": results[f'rep{0}_TestHits@{100}'],
+                # "rep0_TrainSens@100": results[f'rep{0}_TrainSens@{100}'],
+                # "rep0_ValidSens@100": results[f'rep{0}_ValidSens@{100}'],
+                # "rep0_TestSens@100": results[f'rep{0}_TestSens@{100}'],
                 "rep0_true_positive_rate_disparity_Train": results["rep0_true_positive_rate_disparity_Train"],
                 "rep0_true_positive_rate_disparity_Valid": results["rep0_true_positive_rate_disparity_Valid"],
                 "rep0_true_positive_rate_disparity_Test": results["rep0_true_positive_rate_disparity_Test"],
+                "rep0_positive_rate_disparity_Train": results["rep0_positive_rate_disparity_Train"],
+                "rep0_positive_rate_disparity_Valid": results["rep0_positive_rate_disparity_Valid"],
+                "rep0_positive_rate_disparity_Test": results["rep0_positive_rate_disparity_Test"],
                 f'rep{0}_adv_acc_train': results[f'rep{0}_adv_acc_train'],
                 f'rep{0}_adv_acc': results[f'rep{0}_adv_acc'],
                 "epoch_step" : epoch - 1
