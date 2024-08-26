@@ -9,6 +9,7 @@ from torch_geometric.transforms import RandomLinkSplit
 from torch_geometric.data import Data, Dataset
 import os
 from tqdm import tqdm
+from utils import fairsample
 
 # random split dataset
 def randomsplit(dataset, val_ratio: float=0.10, test_ratio: float=0.2):
@@ -133,7 +134,9 @@ def loaddataset(name: str, dataset_path:str, use_valedges_as_input: bool, load=N
             data.full_adj_t = data.full_adj_t.to_symmetric()
         else:
             data.full_adj_t = data.adj_t
+        
     return data, split_edge
+
 
 if __name__ == "__main__":
     loaddataset("Cora", False)

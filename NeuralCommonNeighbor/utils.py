@@ -1,8 +1,11 @@
 import torch
 from torch_sparse import SparseTensor
-from torch import Tensor
+from torch import Tensor, neg
 import torch_sparse
 from typing import List, Tuple
+import numpy as np
+from rbloom import Bloom
+from torch_geometric.seed import seed_everything
 
 
 class PermIterator:
@@ -12,6 +15,7 @@ class PermIterator:
     def __init__(self, device, size, bs, training=True) -> None:
         self.bs = bs
         self.training = training
+        # torch.manual_seed(0)
         self.idx = torch.randperm(
             size, device=device) if training else torch.arange(size,
                                                                device=device)
@@ -30,6 +34,113 @@ class PermIterator:
         ret = self.idx[self.ptr:self.ptr + self.bs]
         self.ptr += self.bs
         return ret
+    
+def disable_training(model):
+    for p in model.parameters():
+        p.requires_grad = False
+    
+def enable_training(model):
+    for p in model.parameters():
+        p.requires_grad = True
+        
+def is_model_trainable(model):
+    """
+    Checks if the model is currently enabled for training.
+    
+    Args:
+        model (nn.Module): The PyTorch model to check.
+        
+    Returns:
+        bool: True if the model is currently trainable, False otherwise.
+    """
+    for param in model.parameters():
+        if param.requires_grad:
+            return True
+    return False
+    
+def fairsample(dataset, split_edge, val_ratio: float=0.10, test_ratio: float=0.2):
+    
+    seed_everything(0)
+    
+    row, col = dataset.edge_index
+    mask = row < col
+    row, col = row[mask], col[mask]
+    
+    num_samples = row.size(0)
+    
+    group_index = dataset.y[dataset.edge_index].sum(0)
+    groups = group_index.unique()
+    proportions = []
+    bf = Bloom(dataset.edge_index.shape[1] * 3, 0.01)
+    
+    print("[FAIR SAMPLER] SAMPLING POSITIVE PAIRS")
+    pos_pairs = None
+    for i in groups.tolist():
+        group_mask = group_index == i
+        group_proportion = (group_mask).sum() / group_index.shape[0]
+        proportions.append(group_proportion)
+        if pos_pairs is None:
+            pos_pairs = dataset.edge_index[:, group_mask][:, torch.randperm(int(group_proportion * num_samples))]
+        else:
+            pos_pairs = torch.cat((pos_pairs, dataset.edge_index[:, group_mask][:, torch.randperm(int(group_proportion * num_samples))]), dim=-1)
+            
+    # Populates the bloom filter with the positive pairs 
+    aux_edge_index = dataset.edge_index.numpy()
+    for i in range(aux_edge_index.shape[1]):
+        bf.add(aux_edge_index[:, i].data.tobytes())
+    
+    non_sens_nodes = (dataset.y == 0).nonzero().flatten().numpy()
+    sens_nodes = (dataset.y == 1).nonzero().flatten().numpy()
+    
+    neg_nodes_groups = [(0, non_sens_nodes, non_sens_nodes), (1, non_sens_nodes, sens_nodes), (2, sens_nodes, sens_nodes)]
+    
+    print("[FAIR SAMPLER] SAMPLING NEGATIVE PAIRS")
+    neg_pairs = []
+    neg_samples_per_group = [0] * groups.shape[0]
+    for cur_edge_group, group1, group2 in neg_nodes_groups:
+        while neg_samples_per_group[cur_edge_group] < int(proportions[cur_edge_group] * num_samples):
+            u = np.random.choice(group1)
+            v = np.random.choice(group2)
+            edge = np.array(sorted([u, v]))
+            if u != v and edge.data.tobytes() not in bf:
+                # cur_edge_group = int(dataset.y[edge].sum().item())
+                neg_samples_per_group[cur_edge_group] += 1
+                neg_pairs.append(edge)
+                bf.add(edge.data.tobytes())
+                
+    neg_pairs = torch.tensor(neg_pairs).t()
+    
+    perm = torch.randperm(pos_pairs.size(1))
+    pos_pairs = pos_pairs[:, perm]
+    perm = torch.randperm(neg_pairs.size(1))
+    neg_pairs = neg_pairs[:, perm]
+            
+    split_edge['train']['edge'] = pos_pairs[:, :int((1 - val_ratio - test_ratio) * num_samples)].t()
+    split_edge['train']['edge_neg'] = neg_pairs[:, :int((1 - val_ratio - test_ratio) * num_samples)].t()
+    
+    split_edge['valid']['edge'] = pos_pairs[:, int((1 - val_ratio - test_ratio) * num_samples):int((1 - test_ratio) * num_samples)].t()
+    split_edge['valid']['edge_neg'] = neg_pairs[:, int((1 - val_ratio - test_ratio) * num_samples):int((1 - test_ratio) * num_samples)].t()
+    
+    split_edge['test']['edge'] = pos_pairs[:, int((1 - test_ratio) * num_samples):].t()
+    split_edge['test']['edge_neg'] = neg_pairs[:, int((1 - test_ratio) * num_samples):].t()
+    
+    dataset.edge_index = split_edge['train']['edge'].t()
+    
+    print(f"Proportions: {proportions}")
+    print(f"Pos pairs: {pos_pairs.shape[1]}")
+    print("Pos train pairs MM", (dataset.y[split_edge['train']['edge']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['train']['edge']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['train']['edge']].sum(0) == 2).sum())
+    print("Pos valid pairs MM", (dataset.y[split_edge['valid']['edge']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['valid']['edge']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['valid']['edge']].sum(0) == 2).sum())
+    print("Pos test pairs MM", (dataset.y[split_edge['test']['edge']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['test']['edge']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['test']['edge']].sum(0) == 2).sum())
+    print(f"Neg pairs: {neg_pairs.shape[1]}")
+    print("Pos train pairs MM", (dataset.y[split_edge['train']['edge_neg']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['train']['edge_neg']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['train']['edge_neg']].sum(0) == 2).sum())
+    print("Pos valid pairs MM", (dataset.y[split_edge['valid']['edge_neg']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['valid']['edge_neg']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['valid']['edge_neg']].sum(0) == 2).sum())
+    print("Pos test pairs MM", (dataset.y[split_edge['test']['edge_neg']].sum(0) == 0).sum(), 'MF', (dataset.y[split_edge['test']['edge_neg']].sum(0) == 1).sum(), 'FF', (dataset.y[split_edge['test']['edge_neg']].sum(0) == 2).sum())
+    
+    # import code
+    # code.interact(local={**locals(), **globals()})
+
+    return dataset, split_edge
+        
 
 
 def sparsesample(adj: SparseTensor, deg: int) -> SparseTensor:

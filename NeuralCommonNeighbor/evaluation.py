@@ -144,6 +144,29 @@ def positive_rate_disparity(eval_pred, eval_groups):
     return p_eval_inter_group - p_eval_intra_group
 
 
+def group_positive_rate_disparity(eval_pred, eval_groups):
+    """
+    Compute the positive disparity.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :return: Positive disparity.
+    """
+    eval_pred = torch.sigmoid(eval_pred)
+    
+    mm = (eval_groups == 0)
+    mf = (eval_groups == 1)
+    ff = (eval_groups == 2)
+    
+    probability_of_a_link_given_group = lambda preds, group_size: torch.sum(preds * (1 / group_size))
+    
+    p_mm = probability_of_a_link_given_group(eval_pred[mm], mm.sum())
+    p_mf = probability_of_a_link_given_group(eval_pred[mf], mf.sum())
+    p_ff = probability_of_a_link_given_group(eval_pred[ff], ff.sum())
+    
+    
+    return p_mm, p_mf, p_ff
+
+
 def true_positive_rate_disparity(eval_true, eval_pred, eval_groups):
     """
     Compute the positive disparity.
@@ -161,3 +184,29 @@ def true_positive_rate_disparity(eval_true, eval_pred, eval_groups):
 
     p_eval_intra_group, p_eval_inter_group = probability_of_a_link_given_group(eval_pred[intra_group], intra_group.sum()), probability_of_a_link_given_group(eval_pred[inter_group], inter_group.sum())
     return p_eval_inter_group - p_eval_intra_group
+
+
+def group_true_positive_rate_disparity(eval_true, eval_pred, eval_groups):
+    """
+    Compute the positive disparity.
+    :param eval_true: Evaluation labels.
+    :param eval_pred: Evaluation predictions.
+    :return: Positive disparity.
+    """
+
+    eval_pred = torch.sigmoid(eval_pred)
+    
+    mm = ((eval_groups == 0)) & (eval_true == 1)
+    mf = (eval_groups == 1) & (eval_true == 1)
+    ff = (eval_groups == 2) & (eval_true == 1)
+    
+    # import code
+    # code.interact(local={**locals(), **globals()})
+    
+    probability_of_a_link_given_group = lambda preds, group_size: torch.sum(preds * (1 / group_size))
+    
+    p_mm = probability_of_a_link_given_group(eval_pred[mm], mm.sum())
+    p_mf = probability_of_a_link_given_group(eval_pred[mf], mf.sum())
+    p_ff = probability_of_a_link_given_group(eval_pred[ff], ff.sum())
+    
+    return p_mm, p_mf, p_ff
